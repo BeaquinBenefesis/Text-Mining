@@ -10,7 +10,12 @@ def get_exact_synonyms(node_data):
         
         if len(parts) > 2:
             text = parts[1]
-            scope = parts[2].strip().split()[0]  # EXACT / RELATED / BROAD / NARROW
+            scope_parts = parts[2].strip().split()
+            
+            if not scope_parts:  # no scope word present, skip
+                continue
+            
+            scope = scope_parts[0]  # EXACT / RELATED / BROAD / NARROW
             
             if scope == "EXACT":
                 exact_syns.append(text)
@@ -41,18 +46,23 @@ graph = obonet.read_obo(obo)
 
 with open(syn, "w") as f:
     for node_id, data in graph.nodes(data=True):
-        syns = []
+        # Skip obsolete terms
+        if not data or data.get("is_obsolete") == "true":
+            continue
+
         name = data.get("name")
 
+        # Skip entries without a name or id instead of crashing
         if not name or not node_id:
-            raise RuntimeError("Found entry without a name or id")
+            print(f"Warning: skipping entry without name or id — id={node_id}, name={name}")
+            continue
+
+        syns = []
 
         # Add main name
-        if name:
-            syns.append(name)
-        
+        syns.append(name)
+
         # Add exact synonyms
-        # TODO: Maybe use broad?
         exact_syns = get_exact_synonyms(data)
         if exact_syns:
             syns.extend(exact_syns)
