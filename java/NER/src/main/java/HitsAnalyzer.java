@@ -5,8 +5,8 @@ import java.util.Iterator;
 public class HitsAnalyzer {
 
     public void analyzeHits(String hitsPath, String sentencePath, String fileMapPath, String out) throws IOException{
-        Iterator<Hit> hits = getHitsIterator(hitsPath);
-        HashMap<String, Hit> sentenceIdToHit = new HashMap<>();
+//        Iterator<Hit> hits = getHitsIterator(hitsPath);
+//        HashMap<String, Hit> sentenceIdToHit = new HashMap<>();
         HashMap<String, Sentence> sentences = readSentences(sentencePath);
 
 //        BufferedWriter writer = new BufferedWriter(new FileWriter(out), 512) {};
@@ -30,8 +30,9 @@ public class HitsAnalyzer {
         BufferedReader reader = new BufferedReader(new FileReader(path));
         String line = reader.readLine();
         HashMap<String, Sentence> out = new HashMap<>();
-
+        int count = 0;
         while (line != null) {
+            if (count % 10_000 == 0) System.out.println("Read: " + count);
             String[] parts = line.split("\t");
             if (parts.length != 2) throw new RuntimeException("Illegal sentence format. Expected 2 columns, found " + parts.length);
             String id = parts[0];
@@ -40,6 +41,7 @@ public class HitsAnalyzer {
 
             out.put(id, sentence);
             line = reader.readLine();
+            count++;
         }
 
         return out;
