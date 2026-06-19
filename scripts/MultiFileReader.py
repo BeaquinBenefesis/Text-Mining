@@ -10,6 +10,7 @@ class MultiFileReader:
     def _index_file(file_path):
         index = []
         offset = 0
+        print(f'Indexing file: {file_path}')
         with open(file_path, 'rb') as f:
             for line in f:
                 index.append(offset)

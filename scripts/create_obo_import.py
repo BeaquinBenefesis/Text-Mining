@@ -37,7 +37,7 @@ def get_links(ontologies):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Parses an .obo file and generate a .csv file for neo4j import"
+        description="Parses an file containing obo linkes and generate a .csv file for neo4j import"
     )
 
     parser.add_argument(
