@@ -1,6 +1,6 @@
 import pandas as pd
 from itertools import groupby
-from hitsUtils import HitsProcessor
+from python.src.NER.hitsUtils import HitsProcessor
 
 results = []
 current_rows = []
