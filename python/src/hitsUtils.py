@@ -6,13 +6,12 @@ import tempfile
 from collections import deque
 import json
 import glob
-from sentence_utils import check_sorted
 from itertools import zip_longest
-from dataclasses import dataclass, field
-from NormUtils import NormalizationStatus
-from typing import Iterator, Optional
+from typing import Iterator
 from collections import Counter
-from enum import Enum
+from models import (NormalizedHit, HitType, HitStatus)
+from sentence_utils import parse_sentence_id
+from dataclasses import dataclass, field
 
 _COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position","hit_length","synonym","prefix","suffix"]
 
@@ -27,10 +26,10 @@ class HitsProcessor:
         self.file_id_to_type = {
             syn_id: self.type_map[os.path.basename(path)]
             for syn_id, path in self.synfile_map.items()
-        }      
+        }
+        self.history = HitProcessorHistory()      
 
-    def get_hits(self, sort=False, resolve_ambiguous=True, print_status=False):
-        history = HitProcessorHistory(sort)
+    def get_hits(self, sort=False, resolve_ambiguous=True, print_summary=True):
         if sort:
             sorted_fd, sorted_path = tempfile.mkstemp()
             os.close(sorted_fd)
@@ -43,20 +42,20 @@ class HitsProcessor:
                 )
                 raw_hits = self._iter_hits(sorted_path)
                 pipeline = (self._resolve_by_article(raw_hits) if resolve_ambiguous else raw_hits)
-                for hit in pipeline:
-                    history.update(hit)
-                    yield hit
+                yield from self._track_output(pipeline)
             finally:
                 os.remove(sorted_path)
         else:
-            raw_hits = self._iter_hits(sorted_path if sort else self.hits_path)
+            raw_hits = self._iter_hits(self.hits_path)
             pipeline = self._resolve_by_article(raw_hits) if resolve_ambiguous else raw_hits
-            for hit in pipeline:
-                history.update(hit)
-                yield hit
-        if print_status:
-            history.print_summary()
+            yield from self._track_output(pipeline)
+        if print_summary:
+            self.history.print_summary()
 
+    def _track_output(self, pipeline: Iterator['NormalizedHit']):
+        for hit in pipeline:
+            self.history.record_output_hit(hit)
+            yield hit
     
     def _resolve_by_article(self, hits: Iterator['NormalizedHit']):
         global_ambisyns = compute_ambisyn_dict(self.synonym_paths)
@@ -69,8 +68,8 @@ class HitsProcessor:
         prev_article = None
         prev_hit = None
         for hit in hits:
-            if prev_hit and not check_sorted(prev_hit.sentence_id, prev_hit.start_position, hit.sentence_id, hit.start_position):
-                raise ValueError(f"Hits are not sorted in article. Can not resolve ambiguous hits!"
+            if prev_hit and not check_sorted(prev_hit, hit):
+                raise ValueError(f"Hits are not sorted. Can not resolve ambiguous hits! "
                                  f"Previous hit: {prev_hit.sentence_id}, current hit: {hit.sentence_id}")
             current_article = hit.article_id
             if prev_article is not None and current_article != prev_article:
@@ -115,20 +114,25 @@ class HitsProcessor:
             if len(group) == 1:
                 hit = group[0]
                 processed_hits.append(hit)
-                hit.hit_status = HitStatus.DEFAULT
+                hit.hit_status = HitStatus.EXACT
+                self.history.record_group(group)
                 continue
 
             possible_ids = global_ambisyns.get(group[0].synonym.lower(), set())
             intersection = possible_ids & unambiguous_ids
+            self.history.record_group(group, intersection_size=len(intersection))
 
             if len(intersection) == 1:
+                # Resolved case
                 hit = group[0]
                 hit.synonym_id = next(iter(intersection))
                 hit.hit_status = HitStatus.RESOLVED
                 processed_hits.append(hit)
             else:
+                status = HitStatus.AMBIGUOUS if len(intersection) > 1 else HitStatus.FAILURE
+                # Could not resolve
                 for hit in group:
-                    hit.hit_status = HitStatus.AMBIGUOUS
+                    hit.hit_status = status
                     processed_hits.append(hit)
 
         return processed_hits
@@ -149,9 +153,10 @@ class HitsProcessor:
                         raise KeyError(f"No synonym file mapped for key: {file_id!r}")
                     file_path = self.synfile_map[file_id]
                     hit_type = self.file_id_to_type[file_id]
+                    sentence_id = parts['sentence_id'].split(':', 1)[1]
                                     
                     hit = NormalizedHit(entity_type=hit_type,
-                                        sentence_id=parts['sentence_id'],
+                                        sentence_id=sentence_id,
                                         synonym_id=reader.extract_id(file_path, int(line_number)),
                                         raw_text=parts['matched_text'],
                                         start_position=int(parts['start_position']),
@@ -159,6 +164,7 @@ class HitsProcessor:
                                         synonym=parts['synonym'],
                                         prefix=parts['prefix'],
                                         suffix=parts['suffix'])
+                    self.history.record_input_hit(hit)
                     
                     yield hit
 
@@ -182,9 +188,6 @@ class HitsProcessor:
                     continue
                     
                 synfile_path, synfile_type = line.split('\t')
-
-                if synfile_type not in HitType.valid_types:
-                    raise ValueError(f'Type {synfile_type} could not be recognized. Valid types are: {HitType.valid_types}')
                 
                 expanded_paths = glob.glob(synfile_path, recursive=True)
                 
@@ -193,64 +196,101 @@ class HitsProcessor:
                         base_name = os.path.basename(matched_path)
                         if base_name in result_map:
                             raise ValueError(f'Conficting synonym file names: {base_name}')
-                        result_map[base_name] = synfile_type
+                        result_map[base_name] = HitType(synfile_type)
                 else:
                     raise ValueError(f'Synonym file(s) {synfile_path} could not be found!')
         return result_map
 
-class HitStatus(str, Enum):
-    DEFAULT = 'DEFAULT'
-    RESOLVED = 'RESOLVED'
-    AMBIGUOUS = 'AMBIGUOUS'
+def check_sorted(hit_1: NormalizedHit, hit_2: NormalizedHit):
+    article_a, section_a, num_a = parse_sentence_id(hit_1.sentence_id)
+    article_b, section_b, num_b = parse_sentence_id(hit_2.sentence_id)
 
-class HitType(str, Enum):
-    valid_types = set(['MIR', 'TAXON', 'DISEASE'])
-    MIR = 'MIR'
-    TAXON = 'TAXON'
-    DISEASE = 'DISEASE'
-    
-@dataclass
-class NormalizedHit:
-    entity_type: str
-    sentence_id: str
-    synonym_id: str
-    raw_text: str
-    start_position: int
-    hit_length: int
-    synonym: str
-    prefix: str
-    suffix: str
-    article_id: str = field(init=False)
-    normalized_id: Optional[str] = None
-    hit_status: Optional[str] = None
-    normalization_status: Optional[NormalizationStatus] = None
-    
-    def __post_init__(self):
-            self.article_id = self.sentence_id.split('.', 1)[0]
-
-class HitProcessorHistory:    
-    def __init__(self, sorted: bool, performed_disambiguation: bool):
-        self.hits_processed = 0
-        self.sorted = sorted
-        self.types_processed = Counter()
-        self.hit_statuses = Counter()
-        self.performed_disambiguation = performed_disambiguation
-    
-    def update(self, hit: NormalizedHit):
-        self.hits_processed += 1
-        self.types_processed[hit.entity_type] += 1
-        if self.performed_disambiguation:
-            self.hit_statuses.update(hit.hit_status)
-    
-    def print_summary(self):
-        print(f"{'--- Processing Summary ---':^30}")
-        print(f"Total Hits Processed: {self.hits_processed}")
-        print(f"Sorted State:        {self.sorted}")
+    if article_a != article_b:
+        return True
         
-        print("\nBreakdown by Entity Type:")
-        for entity, count in self.types_processed.items():
-            print(f"  {entity:<15}: {count}")
-        if self.performed_disambiguation:
-            print("\nBreakdown by Hit Status:")
-            for status, count in self.hit_statuses.items():
-                print(f"  {status:<15}: {count}")
+    return (section_a, num_a, hit_1.start_position) <= (section_b, num_b, hit_2.start_position)
+
+
+@dataclass
+class HitProcessorHistory:
+    input_hits: int = 0
+    output_hits: int = 0
+    groups: int = 0
+    multi_candidate_groups: int = 0
+    groups_size_counts: Counter = field(default_factory=Counter)
+    hit_statuses: Counter = field(default_factory=Counter)
+    per_type_input_hits: Counter = field(default_factory=Counter)
+    per_type_output_hits: Counter = field(default_factory=Counter)
+    dictionary_ambiguous_synonyms: Counter = field(default_factory=Counter)
+    unresolved_synonyms: Counter = field(default_factory=Counter)
+    resolved_synonyms: Counter = field(default_factory=Counter)
+
+    def record_input_hit(self, hit: NormalizedHit):
+        self.input_hits += 1
+        self.per_type_input_hits[hit.entity_type] += 1
+
+    def record_output_hit(self, hit: NormalizedHit):
+        self.output_hits += 1
+        self.per_type_output_hits[hit.entity_type] += 1
+        self.hit_statuses[hit.hit_status] += 1
+
+    def record_group(self, group: list['NormalizedHit'], intersection_size: int = None):
+        size = len(group)
+        self.groups += 1
+        self.groups_size_counts[size] += 1
+        if size == 1:
+            return
+
+        self.multi_candidate_groups += 1
+        synonym = group[0].synonym.lower()
+        self.dictionary_ambiguous_synonyms[synonym] += 1
+
+        if intersection_size == 1:
+            self.resolved_synonyms[synonym] += 1
+        else:
+            self.unresolved_synonyms[synonym] += 1
+
+    @property
+    def hits_collapsed(self) -> int:
+        return self.input_hits - self.output_hits
+
+    def print_summary(self, top_n: int = 15):
+        print(f"{'--- Hit Processor Summary ---':^40}")
+        print(f"Input hits:                 {self.input_hits}")
+        print(f"Output hits:                {self.output_hits}")
+        print(f"Hits collapsed:             {self.hits_collapsed}")
+        print(f"Spans / groups:             {self.groups}")
+        print(f"  Multi-candidate groups:   {self.multi_candidate_groups}")
+
+        resolved = sum(self.resolved_synonyms.values())
+        if self.multi_candidate_groups:
+            print(f"  Resolution rate:          {resolved/self.multi_candidate_groups:.1%} "
+                  f"({resolved}/{self.multi_candidate_groups})")
+
+        print("\nGroup size distribution:")
+        for size, count in sorted(self.groups_size_counts.items()):
+            print(f"  {size} candidates: {count} groups")
+
+        print("\nInput hits by entity type:")
+        for entity, count in self.per_type_input_hits.items():
+            print(f"  {entity:<20}: {count}")
+
+        print("\nOutput hits by entity type:")
+        for entity, count in self.per_type_output_hits.items():
+            print(f"  {entity:<20}: {count}")
+
+        print("\nOutput hits by status:")
+        for status, count in self.hit_statuses.items():
+            print(f"  {status:<20}: {count}")
+
+        print(f"\nTop {top_n} synonyms flagged ambiguous by the dictionary:")
+        for synonym, count in self.dictionary_ambiguous_synonyms.most_common(top_n):
+            print(f"  {synonym:<30}: {count}")
+
+        print(f"\nTop {top_n} synonyms most often successfully resolved:")
+        for synonym, count in self.resolved_synonyms.most_common(top_n):
+            print(f"  {synonym:<30}: {count}")
+
+        print(f"\nTop {top_n} synonyms remaining unresolved:")
+        for synonym, count in self.unresolved_synonyms.most_common(top_n):
+            print(f"  {synonym:<30}: {count}")

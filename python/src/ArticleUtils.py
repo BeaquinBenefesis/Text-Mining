@@ -1,14 +1,15 @@
 from collections import defaultdict
 from collections import deque
 from hitsUtils import HitType
+from models import NormalizedHit
 
 class ArticleContext:
     def __init__(self):
-        self._buffers = defaultdict(deque)
+        self._buffers = defaultdict(deque['NormalizedHit'])
         self._taxon_cache = None
     
-    def add_hit(self, hit):
-        self._buffers[hit['type']].append(hit)
+    def add_hit(self, hit: NormalizedHit):
+        self._buffers[hit.entity_type].append(hit)
     
     def hits_of(self, hit_type):
         return self._buffers.get(hit_type, deque())
@@ -17,7 +18,7 @@ class ArticleContext:
         if self._taxon_cache:
             return self._taxon_cache
         tax_buffer = self._buffers[HitType.TAXON]
-        relevance = {tax['synonym_id'] : 1 for tax in tax_buffer}
+        relevance = {tax.synonym_id : 1 for tax in tax_buffer}
         self._taxon_cache = relevance
         return relevance
     
