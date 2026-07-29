@@ -1,5 +1,4 @@
-from SynFileUtils import MultiSynFileReader
-from SynFileUtils import compute_ambisyn_dict
+from .SynFileUtils import MultiSynFileReader, compute_ambisyn_dict
 import subprocess
 import os
 import tempfile
@@ -9,8 +8,7 @@ import glob
 from itertools import zip_longest
 from typing import Iterator
 from collections import Counter
-from models import (NormalizedHit, HitType, HitStatus)
-from sentence_utils import parse_sentence_id
+from .models import NormalizedHit, HitType, HitStatus, SynonymType, HitGroup
 from dataclasses import dataclass, field
 
 _COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position","hit_length","synonym","prefix","suffix"]
@@ -29,7 +27,7 @@ class HitsProcessor:
         }
         self.history = HitProcessorHistory()      
 
-    def get_hits(self, sort=False, resolve_ambiguous=True, print_summary=True):
+    def get_hits(self, remove_sent_id_prefix=True, map_syn=True, sort=False, resolve_ambiguous=True, print_summary=True):
         if sort:
             sorted_fd, sorted_path = tempfile.mkstemp()
             os.close(sorted_fd)
@@ -40,13 +38,15 @@ class HitsProcessor:
                     capture_output=True,
                     text=True,
                 )
-                raw_hits = self._iter_hits(sorted_path)
+                raw_hits = self._iter_hits(hits_path=sorted_path,
+                                           map_syn=map_syn,
+                                           remove_sent_id_prefix=remove_sent_id_prefix)
                 pipeline = (self._resolve_by_article(raw_hits) if resolve_ambiguous else raw_hits)
                 yield from self._track_output(pipeline)
             finally:
                 os.remove(sorted_path)
         else:
-            raw_hits = self._iter_hits(self.hits_path)
+            raw_hits = self._iter_hits(self.hits_path, map_syn)
             pipeline = self._resolve_by_article(raw_hits) if resolve_ambiguous else raw_hits
             yield from self._track_output(pipeline)
         if print_summary:
@@ -68,7 +68,7 @@ class HitsProcessor:
         prev_article = None
         prev_hit = None
         for hit in hits:
-            if prev_hit and not check_sorted(prev_hit, hit):
+            if prev_hit and not prev_hit.sort_key <= hit.sort_key:
                 raise ValueError(f"Hits are not sorted. Can not resolve ambiguous hits! "
                                  f"Previous hit: {prev_hit.sentence_id}, current hit: {hit.sentence_id}")
             current_article = hit.article_id
@@ -81,9 +81,61 @@ class HitsProcessor:
 
         if hit_buffer:
             yield from self._resolve_ambiguous_hits(hit_buffer, global_ambisyns)
-
     
-
+    # Find hits mapping to exactly the same positions
+    @staticmethod   
+    def _group_hits_by_span(unprocessed_hits: deque[NormalizedHit]) -> list[HitGroup]:
+        groups = []
+        current_group = HitGroup()
+        prev_span = None
+        for hit in unprocessed_hits:
+            span = hit.sort_key
+            if prev_span is not None and span != prev_span:
+                groups.append(current_group)
+                current_group = HitGroup()
+            current_group.add_hit(hit)
+            prev_span = span
+        if current_group:
+            groups.append(current_group)
+        return groups
+    
+    # Returns a set of unambiguous synonym id hits, that did not come from an abbreviation hit
+    @staticmethod
+    def collect_unambiguous_ids(groups: list[HitGroup]) -> set:
+        return set([g.get_first().synonym_id for g in groups 
+                    if not g.is_ambiguous() and g.get_first().synonym_type != SynonymType.ABBREVIATION])
+    
+    def resolve_abbreviations(groups: list[HitGroup], unambiguous_ids: set) -> Iterator[NormalizedHit]:
+        for g in groups:
+            if not g.contains_abbreviations:
+                continue
+            for hit in g.hits:
+                if hit.synonym_type == SynonymType.ABBREVIATION:
+                    
+    
+    def _resolve_ambiguous_groups(groups: list[HitGroup], unambiguous_ids: set):
+        processed_hits = deque()
+        for g in groups:
+            if not g.is_ambiguous():
+                hit = g.get_first()
+                processed_hits.append(hit)
+                hit.hit_status = HitStatus.EXACT
+                continue
+            
+            intersection = unambiguous_ids & g.ids
+            if len(intersection) == 1:
+                hit = g.get_first()
+                hit.synonym_id = next(iter(intersection))
+                hit.hit_status = HitStatus.RESOLVED
+                processed_hits.append(hit)
+            else:
+                status = HitStatus.AMBIGUOUS if len(intersection) > 1 else HitStatus.FAILURE
+                for hit in g.hits:
+                    hit.hit_status = status
+                    processed_hits.append(hit)
+        return processed_hits
+                
+      
     def _resolve_ambiguous_hits(self, unprocessed_hits: deque['NormalizedHit'], global_ambisyns: dict) -> deque['NormalizedHit']:
         groups = []
         current_group = []
@@ -96,7 +148,7 @@ class HitsProcessor:
             if not is_ambiguous:
                 unambiguous_ids.add(hit.synonym_id)
 
-            span = (hit.sentence_id, hit.start_position, hit.hit_length)
+            span = hit.sort_key
             if prev_span is not None and span != prev_span:
                 groups.append(current_group)
                 current_group = []
@@ -139,7 +191,7 @@ class HitsProcessor:
 
         
 
-    def _iter_hits(self, hits_path) -> Iterator['NormalizedHit']:
+    def _iter_hits(self, hits_path, map_syn=True, remove_sent_id_prefix=True) -> Iterator['NormalizedHit']:
         '''Returns a stream of NormalizedHit objects.'''
         with MultiSynFileReader(self.low_memory) as reader:
             with open(hits_path, 'r') as f:
@@ -148,16 +200,26 @@ class HitsProcessor:
                     if not line:
                         continue
                     parts = dict(zip_longest(_COL_NAMES, [x.strip() for x in line.split('\t')], fillvalue=''))
-                    file_id, line_number = parts['synonym_id'].split(':', 1)
-                    if file_id not in self.synfile_map:
-                        raise KeyError(f"No synonym file mapped for key: {file_id!r}")
-                    file_path = self.synfile_map[file_id]
-                    hit_type = self.file_id_to_type[file_id]
-                    sentence_id = parts['sentence_id'].split(':', 1)[1]
+                    
+                    synonym_id = parts['synonym_id']
+                    hit_type = HitType.DEFAULT
+                    synonym_type = SynonymType.UNKNOWN
+                    
+                    if map_syn:
+                        file_id, line_number = parts['synonym_id'].split(':', 1)
+                        if file_id not in self.synfile_map:
+                            raise KeyError(f"No synonym file mapped for key: {file_id!r}")
+                        file_path = self.synfile_map[file_id]
+                        hit_type, is_abbrev = self.file_id_to_type[file_id]
+                        synonym_id = reader.extract_id(file_path, int(line_number))
+                        synonym_type = SynonymType.ABBREVIATION if is_abbrev else SynonymType.STANDARD
+                
+                    sentence_id = parts['sentence_id'].split(':', 1)[1] if remove_sent_id_prefix else parts['sentence_id']
                                     
                     hit = NormalizedHit(entity_type=hit_type,
+                                        synonym_type=synonym_type,
                                         sentence_id=sentence_id,
-                                        synonym_id=reader.extract_id(file_path, int(line_number)),
+                                        synonym_id=synonym_id,
                                         raw_text=parts['matched_text'],
                                         start_position=int(parts['start_position']),
                                         hit_length=int(parts['hit_length']),
@@ -170,24 +232,28 @@ class HitsProcessor:
 
     @staticmethod        
     def parse_synfile_map(path) -> dict:
-            map = {}
-            with open(path, 'r') as f:
-                 for line in f:
-                    line = line.strip()
-                    synfile_path, synfile_id = line.split('\t')
-                    map[synfile_id] = synfile_path
+        map = {}
+        if not path:
             return map
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                synfile_path, synfile_id = line.split('\t')
+                map[synfile_id] = synfile_path
+        return map
     
     @staticmethod
     def parse_synfile_type_map(path):
         result_map = {}
+        if not path:
+            return map
         with open(path) as f:
             for line in f:
                 line = line.strip()
                 if not line:  # Skip empty lines if any
                     continue
                     
-                synfile_path, synfile_type = line.split('\t')
+                synfile_path, synfile_type, is_abbrev = line.split('\t')
                 
                 expanded_paths = glob.glob(synfile_path, recursive=True)
                 
@@ -196,20 +262,10 @@ class HitsProcessor:
                         base_name = os.path.basename(matched_path)
                         if base_name in result_map:
                             raise ValueError(f'Conficting synonym file names: {base_name}')
-                        result_map[base_name] = HitType(synfile_type)
+                        result_map[base_name] = (HitType(synfile_type), is_abbrev)
                 else:
                     raise ValueError(f'Synonym file(s) {synfile_path} could not be found!')
         return result_map
-
-def check_sorted(hit_1: NormalizedHit, hit_2: NormalizedHit):
-    article_a, section_a, num_a = parse_sentence_id(hit_1.sentence_id)
-    article_b, section_b, num_b = parse_sentence_id(hit_2.sentence_id)
-
-    if article_a != article_b:
-        return True
-        
-    return (section_a, num_a, hit_1.start_position) <= (section_b, num_b, hit_2.start_position)
-
 
 @dataclass
 class HitProcessorHistory:
@@ -294,3 +350,4 @@ class HitProcessorHistory:
         print(f"\nTop {top_n} synonyms remaining unresolved:")
         for synonym, count in self.unresolved_synonyms.most_common(top_n):
             print(f"  {synonym:<30}: {count}")
+            
