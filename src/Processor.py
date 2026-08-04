@@ -1,14 +1,14 @@
-from hitsUtils import HitsProcessor
-from hitsUtils import HitType
+from src.hitsUtils import HitsProcessor, HitType
+from src.ArticleUtils import ArticleSource, ArticleRecord, ArticleEvidence
 from collections import deque
-from sentence_utils import SentenceReader
-from NormUtils import MirNormalizer, DefaultNormalizer, EntityNormalizer
-from ArticleUtils import ArticleContext
+from src.sentence_utils import SentenceReader
+from src.NormUtils import MirNormalizer, DefaultNormalizer, EntityNormalizer
 from resources import MirResourceLoader
 from typing import Iterable
-from models import NormalizedHit
+from models import NormalizedHit, CandidateHit, NormalizationContext
 from collections import Counter
 from dataclasses import dataclass, field
+
 
 class Processor:
     
@@ -20,37 +20,35 @@ class Processor:
         self.normalizers = normalizers
         self.processor_history = ProcessorHistory()
    
-    def get_normalized_hit_stream(self, 
-                                  sort_hits=True, 
-                                  resolve_ambiguous_hits=True,
-                                  print_summary: bool = True) -> Iterable['NormalizedHit']:
-        article_context = ArticleContext()
-        article_hits = deque()
-        prev_article = None
-        for hit in self.hits_processor.get_hits(sort=sort_hits, 
-                                                 resolve_ambiguous=resolve_ambiguous_hits,
-                                                 print_summary=print_summary) :
-            self.processor_history.record_input_hit(hit)
-            if prev_article and prev_article != hit.article_id:
-                self.processor_history.record_article()
-                yield from self._normalize_article(article_hits, article_context)
-                article_context.clear()
-                article_hits.clear()
-            prev_article = hit.article_id
-            article_context.add_hit(hit)
-            article_hits.append(hit)
-        if article_hits:
-            self.processor_history.record_article()
-            yield from self._normalize_article(article_hits, article_context)
-        if print_summary:
-            self.processor_history.print_summary()
 
-    def _normalize_article(self, hits: Iterable['NormalizedHit'], context: ArticleContext):
-        for raw_hit in hits:
-            normalizer = self.normalizers[raw_hit.entity_type]
-            for normalized_hit in normalizer.normalize(raw_hit, context):
-                self.processor_history.record_output_hit(normalized_hit)
-                yield normalized_hit
+    
+    def _normalize_article(self, article: ArticleRecord, normalization_context: NormalizationContext) -> list[NormalizedHit]:
+        normalized_hits = []
+        for candidate_hit in article.resolved_hits:
+            normalizer = self.normalizers[candidate_hit.entity_type]
+            normalized_hits.extend(normalizer.normalize(candidate_hit, normalization_context))
+        return normalized_hits
+                
+    
+    def get_normalized_article_stream(self,
+                                      sort_hits=True,
+                                      resolve_ambiguous_hits=True,
+                                      print_summary = True):
+        for article in self.hits_processor.read_articles(source=ArticleSource.SYSTEM,
+                                                         remove_sent_id_prefix=True,
+                                                         sort=sort_hits,
+                                                         print_summary=print_summary):
+            context = Processor._build_normalization_context(article.resolved_hits)
+            article.normalized_hits = self._normalize_article(article, context)
+            
+    
+    @staticmethod
+    def _build_normalization_context(resolved_hits: list[CandidateHit]) -> NormalizationContext:
+        context = NormalizationContext()
+        for hit in resolved_hits:
+            context.add_hit(hit)
+        return context
+            
 
 @dataclass
 class ProcessorHistory: 

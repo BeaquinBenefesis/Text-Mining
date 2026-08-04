@@ -13,16 +13,19 @@ class SynGrepResult:
     synfile_map_path: str
     synfile_type_map_path: str
 
-def _write_synfile_type_map(synonyms: dict[HitType, list[str]], path: str):
+def _write_synfile_type_map(synonyms: dict[HitType, list[str]], abbrevs: dict[HitType, list[str]], path: str):
     with open(path, 'w') as fh:
         for hit_type, paths in synonyms.items():
             for p in paths:
-                fh.write(f'{p}\t{hit_type.name}\n')
-
+                fh.write(f'{p}\t{hit_type.name}\t{False}\n')
+        for hit_type, paths in abbrevs.items():
+            for p in paths:
+                fh.write(f'{p}\t{hit_type.name}\t{True}\n')
 
 def run_syngrep(sentence_pattern: str,
                 synonyms: dict[HitType, list[str]],
                 output_dir: str,
+                abbrev_synonyms: dict[HitType, list[str]] = [],
                 within_word: list[str] | None = None,
                 output_name: str = 'output',
                 word_char: str = 'SYNONYMS',
@@ -34,10 +37,14 @@ def run_syngrep(sentence_pattern: str,
     synfile_map_path = None
     synfile_type_map_path = None
     raw_synonyms = [p for paths in synonyms.values() for p in paths]
-    program_args = ['-wordChar', word_char, '-syn', *raw_synonyms]
+    raw_abbrevs = [p for paths in abbrev_synonyms.values() for p in paths] if abbrev_synonyms else []
+    combined = []
+    combined.extend(raw_synonyms)
+    combined.extend(raw_abbrevs)
+    program_args = ['-wordChar', word_char, '-syn', *combined]
     
     if abbrev:
-        program_args.extend(['-abbrev'])
+        program_args.extend(['--abbrev', 'relaxed'])
     
     if within_word:
         program_args.extend(['-withinWord', *[os.path.basename(p) for p in within_word]])
@@ -55,7 +62,7 @@ def run_syngrep(sentence_pattern: str,
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         synfile_map_path = os.path.join(output_dir, 'synfile.map')
         synfile_type_map_path = os.path.join(output_dir, 'synfile_type.map')
-        _write_synfile_type_map(synonyms, synfile_type_map_path)
+        _write_synfile_type_map(synonyms, abbrev_synonyms,synfile_type_map_path)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f'syngrep failed (exit {e.returncode}):\n'

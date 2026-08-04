@@ -1,24 +1,29 @@
 from abc import ABC, abstractmethod
-from collections import deque
+from collections import defaultdict
 import re
 import json
 import pandas as pd
-from ArticleUtils import ArticleContext
-from models import (NormalizedHit, NormalizationResult, NormalizationTargetType, NormalizationStatus)
-from typing import Iterable
-from resources import MirResourceLoader, MirNormalizationResources
-from sentence_utils import SentenceReader
+from src.models import (CandidateHit, NormalizedHit, NormalizationResult, NormalizationTargetType, NormalizationStatus, NormalizationContext)
+from typing import Iterable, Optional
+from src.resources import MirResourceLoader, MirNormalizationResources
+from src.sentence_utils import SentenceReader
 from dataclasses import dataclass, field
+
+@dataclass
+class MirNormalizationCandidate:
+    normalization: NormalizationResult
+    prefix: Optional[str] = None
+    suffix: Optional[str] = None
 
 class EntityNormalizer(ABC):
     @abstractmethod
-    def normalize(self, hit: NormalizedHit, article_context: ArticleContext) -> Iterable['NormalizedHit']:
+    def normalize(self, hit: CandidateHit, normalization_context: NormalizationContext) -> Iterable['NormalizedHit']:
         ...
 
 class DefaultNormalizer(EntityNormalizer):
-    def normalize(self, hit: NormalizedHit, article_context: ArticleContext) -> Iterable['NormalizedHit']:
-        hit.normalization = NormalizationResult(NormalizationStatus.NORMALIZED, hit.synonym_id)
-        return deque([hit])
+    def normalize(self, hit: CandidateHit, normalization_context: NormalizationContext) -> Iterable['NormalizedHit']:
+        norm_result = NormalizationResult(NormalizationStatus.NORMALIZED, hit.entity_id)
+        return [NormalizedHit.from_candidate(hit, norm_result)]
 
 class MirNormalizer(EntityNormalizer):
     _SUFFIX_CLEANER = re.compile(r"[^a-zA-Z0-9-]+")
@@ -30,93 +35,92 @@ class MirNormalizer(EntityNormalizer):
         self.sentence_reader = sentence_reader
         self.resources = resources
         
-    def normalize(self, hit: NormalizedHit, article_context: ArticleContext) -> Iterable['NormalizedHit']:
-        buffer_out = deque()
+    def normalize(self, hit: CandidateHit, normalization_context: NormalizationContext) -> Iterable['NormalizedHit']:
+        buffer_out = []
         normalized_prefix = self._normalize_mirna_prefix(hit.prefix.lower())
         suffix_groups = self._normalize_mirna_suffix(hit.suffix.lower())
-        mirna_body = MirIdMapper.resolve_token(hit.synonym_id)
+        mirna_body = MirIdMapper.resolve_token(hit.entity_id)
+        sentence_id = hit.sentence_id
         
         if mirna_body is None:
-            raise ValueError(f'Unresolved miRNA synonym id: {hit.synonym_id}')
+            raise ValueError(f'Unresolved miRNA entity id: {hit.entity_id}')
 
         # NO SUFFIX = FILTER
         if not suffix_groups and mirna_body != 'bantam':
-            hit.normalization = NormalizationResult(NormalizationStatus.FILTERED)
-            buffer_out.append(hit)
+            normalized_hit = NormalizedHit.from_candidate(hit,  NormalizationResult(NormalizationStatus.FILTERED))
+            buffer_out.append(normalized_hit)
             return buffer_out
         
-        # SUFFIX FOUND
-        mirna_with_suffix = None
+        combined_suffix = None
         if suffix_groups:
             normalized_suffix, mature_part = suffix_groups
             combined_suffix = normalized_suffix + mature_part
             combined_suffix = MirNormalizer._SUFFIX_CLEANER.sub('-', combined_suffix)
-            mirna_with_suffix = mirna_body + combined_suffix
-            hit.suffix = combined_suffix
-        else:
-            mirna_with_suffix = mirna_body
-
+                
+        norm_candidates: list[MirNormalizationCandidate] = []
         if not normalized_prefix:
-            taxon_relevance = article_context.get_taxon_relevance()
-            buffer_out.extend(self._resolve_missing_prefix(hit.sentence_id, 
-                                                           mirna_with_suffix, 
-                                                           taxon_relevance.keys(), 
-                                                           hit))
+            taxon_relevance = normalization_context.get_taxon_relevance()
+            norm_candidates.extend(self._resolve_missing_prefix(sentence_id=sentence_id,
+                                                                mirna_body=mirna_body,
+                                                                mirna_suffix=combined_suffix,
+                                                                relevant_taxons=taxon_relevance.keys())
+            )
         else:
-            hit.prefix = normalized_prefix
-            combined = f"{normalized_prefix}-{mirna_with_suffix}"
-            hit.normalization = self._map_to_accession(combined)
-            buffer_out.append(hit)
+            norm_results = self._map_to_accession(prefix=normalized_prefix,
+                                                  mirna_body=mirna_body,
+                                                  suffix=combined_suffix)
+            norm_candidates.extend(MirNormalizationCandidate(normalization=r, 
+                                                             prefix=normalized_prefix,
+                                                             suffix=combined_suffix) for r in norm_results)
+            
+        for norm_candidate in norm_candidates:
+            buffer_out.append(NormalizedHit.from_candidate(hit, 
+                                                           normalization=norm_candidate.normalization, 
+                                                           prefix=norm_candidate.prefix, 
+                                                           suffix=norm_candidate.suffix))
     
         return buffer_out
     
     # If prefix is missing, try to infer it, unless the hit is a family hit
-    def _resolve_missing_prefix(self, sentence_id, mirna_with_suffix, relevant_taxons, hit: NormalizedHit) -> Iterable['NormalizedHit']:
-        matches = deque()
+    def _resolve_missing_prefix(self, sentence_id, mirna_body, mirna_suffix, relevant_taxons) -> Iterable[MirNormalizationCandidate]:
+        mirna_with_suffix = MirNormalizer._join_parts(mirna_body, mirna_suffix)
         implied_prefixes = self._get_implied_prefixes(relevant_taxons)
         mirbase_prefixes = self.resources.mirna_2_prefix.get(mirna_with_suffix, None)
         family_accession = self.resources.family_normalizer.get(mirna_with_suffix, None)
         
         if family_accession and (not mirbase_prefixes or self._is_family_sentence(sentence_id)):
-            hit.normalization = NormalizationResult(NormalizationStatus.FALLBACK, 
-                                                    family_accession, 
-                                                    NormalizationTargetType.MIR_FAMILY)
-            matches.append(hit)
+            norm_result = NormalizationResult(NormalizationStatus.FALLBACK, family_accession, NormalizationTargetType.MIR_FAMILY)
+            return [MirNormalizationCandidate(normalization=norm_result)]
         elif not mirbase_prefixes:
-            hit.normalization = NormalizationResult(NormalizationStatus.UNRESOLVED)
-            matches.append(hit)
+            norm_result = NormalizationResult(NormalizationStatus.UNRESOLVED)
+            return [MirNormalizationCandidate(normalization=norm_result)]
         else:
-            matches.extend(self._resolve_by_prefix_intersection(hit, 
-                                                                mirna_with_suffix, 
-                                                                implied_prefixes, 
-                                                                mirbase_prefixes))
-        return matches
-    
+            return self._resolve_by_prefix_intersection(mirna_with_suffix, implied_prefixes, mirbase_prefixes)
+                
     # This returns the set of prefixes mentioned in the article
     def _get_implied_prefixes(self, relevant_taxons) -> set:
         return {self.resources.taxon_2_prefix[tax_id] for tax_id in relevant_taxons if tax_id in self.resources.taxon_2_prefix}
 
     # Try to infer the missing prefix by the intersection of implied prefixes and allowed prefixes
-    def _resolve_by_prefix_intersection(self, hit: NormalizedHit, mirna_with_suffix, implied_prefixes, mirbase_prefixes) -> Iterable['NormalizedHit']:
-        matches = deque()
+    def _resolve_by_prefix_intersection(self, mirna_body, suffix, implied_prefixes, mirbase_prefixes) -> Iterable[MirNormalizationCandidate]:
+        matches = []
         possible_prefixes = implied_prefixes & mirbase_prefixes
         if not possible_prefixes:
-            hit.normalization = NormalizationResult(NormalizationStatus.UNRESOLVED)
-            matches.append(hit)
+            norm_result = NormalizationResult(NormalizationStatus.UNRESOLVED)
+            matches.append(MirNormalizationCandidate(normalization=norm_result))
         else:
             for prefix in possible_prefixes:
-                combined = prefix + '-' + mirna_with_suffix
-                normalization_result = self._map_to_accession(combined)
-                copy = hit.copy(prefix=prefix, normalization=normalization_result)
-                matches.append(copy)
+                normalization_result = self._map_to_accession(prefix=prefix, mirna_body=mirna_body, suffix=suffix)
+                matches.append(MirNormalizationCandidate(normalization=normalization_result,prefix=prefix, suffix=suffix))
         return matches
     
     # Given the full mirna name, try to map to a unique accession (MIPF, MI, MIMAT)
-    def _map_to_accession(self, combined_mirna) -> NormalizationResult:
+    def _map_to_accession(self, prefix, mirna_body, suffix) -> NormalizationResult:
         accession = None
         status = None
         target_type = None
         is_dead = False
+        combined_mirna = MirNormalizer._join_parts(prefix, mirna_body, suffix)
         if combined_mirna in self.resources.ambiguous_precursors or combined_mirna in self.resources.ambiguous_mature:
             status = NormalizationStatus.IN_BLACKLIST
         else:
@@ -155,6 +159,10 @@ class MirNormalizer(EntityNormalizer):
             return match.group(1) if match.group(1) else '', match.group(2) if match.group(2) else ''
         else:
             return None
+    
+    @staticmethod
+    def _join_parts(*parts: Optional[str]) -> str:
+        return '-'.join(p for p in parts if p)
 
 class MirIdMapper:
     _id_to_token = {
@@ -167,5 +175,7 @@ class MirIdMapper:
         }
 
     @staticmethod
-    def resolve_token(synonym_id: str) -> str | None:
-        return MirIdMapper._id_to_token.get(synonym_id)
+    def resolve_token(entity_id: str) -> str | None:
+        return MirIdMapper._id_to_token.get(entity_id)
+
+

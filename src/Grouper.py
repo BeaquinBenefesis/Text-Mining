@@ -1,5 +1,5 @@
 from typing import Iterator
-from models import NormalizedHit, NormalizationStatus, HitType, Association
+from src.models import NormalizedHit, NormalizationStatus, HitType, Association
 from itertools import groupby, combinations
 from collections import Counter
 
