@@ -1,9 +1,7 @@
-from collections import defaultdict
-from collections import deque
-from src.models import CandidateHit, NormalizedHit, HitGroup
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+from textmining.models import CandidateHit, NormalizedHit, HitGroup
 
 
 @dataclass

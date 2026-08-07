@@ -1,45 +1,43 @@
-from src.hitsUtils import HitsProcessor, HitType
-from src.ArticleUtils import ArticleSource, ArticleRecord, ArticleEvidence
-from collections import deque
-from src.sentence_utils import SentenceReader
-from src.NormUtils import MirNormalizer, DefaultNormalizer, EntityNormalizer
-from resources import MirResourceLoader
-from typing import Iterable
+from typing import Iterator
 from models import NormalizedHit, CandidateHit, NormalizationContext
 from collections import Counter
 from dataclasses import dataclass, field
+from scoring import HitScorer
+from textmining.hit_utils import HitsProcessor, HitType
+from textmining.article_utils import ArticleSource, ArticleRecord
+from textmining.normalization import EntityNormalizer
 
 
 class Processor:
-    
     def __init__(self,
                  hits_processor: HitsProcessor,
-                 normalizers: dict[HitType, EntityNormalizer]):
+                 normalizers: dict[HitType, EntityNormalizer],
+                 scorer: HitScorer):
         
         self.hits_processor = hits_processor       
         self.normalizers = normalizers
+        self.scorer = scorer
         self.processor_history = ProcessorHistory()
    
-
-    
     def _normalize_article(self, article: ArticleRecord, normalization_context: NormalizationContext) -> list[NormalizedHit]:
-        normalized_hits = []
+        normalized_hits: NormalizedHit = []
         for candidate_hit in article.resolved_hits:
             normalizer = self.normalizers[candidate_hit.entity_type]
             normalized_hits.extend(normalizer.normalize(candidate_hit, normalization_context))
+        for normalized_hit in normalized_hits:
+            normalized_hit.score = self.scorer.compute_score(normalized_hit.entity_type, normalized_hit.normalization.normalized_id)
         return normalized_hits
-                
-    
+                 
     def get_normalized_article_stream(self,
                                       sort_hits=True,
-                                      resolve_ambiguous_hits=True,
-                                      print_summary = True):
+                                      print_summary = True) -> Iterator[ArticleRecord]:
         for article in self.hits_processor.read_articles(source=ArticleSource.SYSTEM,
                                                          remove_sent_id_prefix=True,
                                                          sort=sort_hits,
                                                          print_summary=print_summary):
             context = Processor._build_normalization_context(article.resolved_hits)
             article.normalized_hits = self._normalize_article(article, context)
+            yield article
             
     
     @staticmethod

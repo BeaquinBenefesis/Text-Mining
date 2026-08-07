@@ -25,7 +25,7 @@ def _write_synfile_type_map(synonyms: dict[HitType, list[str]], abbrevs: dict[Hi
 def run_syngrep(sentence_pattern: str,
                 synonyms: dict[HitType, list[str]],
                 output_dir: str,
-                abbrev_synonyms: dict[HitType, list[str]] = [],
+                abbrev_synonyms: dict[HitType, list[str]] = {},
                 within_word: list[str] | None = None,
                 output_name: str = 'output',
                 word_char: str = 'SYNONYMS',
@@ -44,7 +44,7 @@ def run_syngrep(sentence_pattern: str,
     program_args = ['-wordChar', word_char, '-syn', *combined]
     
     if abbrev:
-        program_args.extend(['--abbrev', 'relaxed'])
+        program_args.extend(['-abbrev', 'relaxed'])
     
     if within_word:
         program_args.extend(['-withinWord', *[os.path.basename(p) for p in within_word]])

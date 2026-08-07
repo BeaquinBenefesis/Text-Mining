@@ -1,18 +1,16 @@
-from src.SynFileUtils import MultiSynFileReader
 import subprocess
 import os
 import tempfile
-from collections import deque
-import json
 import glob
 from itertools import zip_longest
 from typing import Iterator, Optional
 from collections import Counter
-from src.models import HitType, SynonymType, HitGroup, GroupStatus, CandidateHit
-from src.ArticleUtils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
 from dataclasses import dataclass, field
-from src.sentence_utils import parse_sentence_id
-from src.Ontology import OntologyGraph
+from textmining.models import HitType, SynonymType, HitGroup, GroupStatus, CandidateHit
+from textmining.article_utils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
+from textmining.ontology import OntologyGraph
+from textmining.synonym_utils import MultiSynFileReader
+
 
 _SYNGREP_COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position", "hit_length","synonym","prefix","suffix"]
 _GOLD_COL_NAMES = ["sentence_id", "entity_id", "matched_text", "start_position", "hit_length", "entity_type", "mention_type"]
@@ -140,12 +138,13 @@ class HitsProcessor:
                 g.group_status = GroupStatus.RESOLVED
                 continue
             supported_ids = implied_ids & article_evidence.unambiguous_entity_ids
+
             if len(supported_ids) == 1:
                 resolved_id = next(iter(supported_ids))
                 hit = next(h for h in filtered_hits if h.entity_id == resolved_id)
                 resolved_hits.append(hit)
                 g.group_status = GroupStatus.RESOLVED
-            elif len(supported_ids) > 1:
+            else:
                 entity_type_set = g.entity_type_set()
                 if len(entity_type_set) != 1:
                    g.group_status = GroupStatus.AMBIGUOUS
@@ -155,17 +154,16 @@ class HitsProcessor:
                 if not ontology:
                     g.group_status = GroupStatus.AMBIGUOUS
                     continue
-                lca = ontology.find_lca(*supported_ids)
+                lca = ontology.find_lca(*implied_ids)             
+                
                 if not lca:
                     g.group_status = GroupStatus.AMBIGUOUS
                     continue
                 else:
-                    template = next(h for h in filtered_hits if h.entity_id in supported_ids)
+                    template = next(h for h in filtered_hits if h.entity_id in implied_ids)
                     inferred_hit = template.copy(entity_id=lca)
                     resolved_hits.append(inferred_hit)
                     g.group_status = GroupStatus.RESOLVED
-            else:
-                g.group_status = GroupStatus.FAILURE
         
         # RECORDING
         for g in hit_groups:

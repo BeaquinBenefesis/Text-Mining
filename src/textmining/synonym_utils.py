@@ -1,7 +1,4 @@
 import mmap
-from collections import defaultdict
-import os
-
 import os
 from collections import defaultdict, Counter
 

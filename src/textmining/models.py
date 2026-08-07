@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field, replace
 from typing import Optional
 from enum import Enum
-from src.sentence_utils import parse_sentence_id
 from natsort import natsort_key
 from collections import defaultdict
+from textmining.scoring import HitScore
+from textmining.sentence_utils import parse_sentence_id
+
 
 class GroupStatus(str, Enum):
     DEFAULT = 'DEFAULT' # No disambiguation performed
@@ -83,7 +85,7 @@ class HitGroup:
         )
     
     def entity_type_set(self) -> set[HitType]:
-        return {h.entity_typet for h in self.hits}
+        return {h.entity_type for h in self.hits}
         
 class NormalizationStatus(str, Enum):
     NORMALIZED = 'NORMALIZED' # Successful exact normalization
@@ -112,15 +114,15 @@ class Association:
     entity_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
 
-
 @dataclass
 class NormalizedHit(CandidateHit):
-    normalization: Optional[NormalizationResult] = None
+    normalization: NormalizationResult
+    score: Optional[HitScore] = None
     @classmethod
     def from_candidate(
         cls,
         candidate: CandidateHit,
-        normalization: Optional['NormalizationResult'] = None,
+        normalization: NormalizationResult,
         **changes
     ) -> 'NormalizedHit':
         return cls(

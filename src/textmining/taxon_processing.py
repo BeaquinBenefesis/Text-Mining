@@ -1,10 +1,8 @@
 import pandas as pd
-from hitsUtils import HitsProcessor
+from src.textmining.hit_utils import HitsProcessor
 import json
 from collections import defaultdict
-import numpy as np
 from itertools import combinations
-from itertools import permutations
 from collections import Counter
 import math
 

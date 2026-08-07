@@ -97,7 +97,6 @@ def main():
     doid_graph = obonet.read_obo(DOID_OBO_PATH)
     doid_disease_terms = descendants_exclusive(doid_graph, DOID_DISEASE_ROOT_IDS)
     
-    count = 1
     mapping = {}
     seen_doid_to_ids = {}
     global_synonyms = defaultdict(set)
@@ -110,24 +109,21 @@ def main():
         if not data or is_obsolete(data):
             continue
         
-        new_id = f'DISEASE_{count}'
         extracted_syns = get_synonyms(data)
         
-        global_synonyms[new_id].update(extracted_syns['exact'])
+        global_synonyms[term_id].update(extracted_syns['exact'])
         if extracted_syns['abbreviation']:
-            global_abbreviations[new_id].update(extracted_syns['abbreviation'])
+            global_abbreviations[term_id].update(extracted_syns['abbreviation'])
         
         exact_id_matches = get_exactmatch_property_values(data)
-        if len(exact_id_matches) > 0:
-            exact_id_matches.append(term_id)
-            mapping[new_id] = exact_id_matches
+        exact_id_matches.append(term_id)
+        mapping[term_id] = exact_id_matches
         
         eq_doids = [id for id in exact_id_matches if id.startswith('DOID')]
         if eq_doids and len(eq_doids) > 0:
             for eq_doid in eq_doids:
-                seen_doid_to_ids[eq_doid] = new_id
+                seen_doid_to_ids[eq_doid] = term_id
             
-        count += 1
 
     # 2. Process DOID terms
     for term_id in doid_disease_terms:
@@ -154,34 +150,38 @@ def main():
             continue
         
         # New DOID disease term not matched via MONDO
-        new_id = f'DISEASE_{count}'
-        global_synonyms[new_id].update(found_synonyms)
-        if found_abbreviations:
-            global_abbreviations[new_id].update(found_abbreviations)
+        #global_synonyms[term_id].update(found_synonyms)
+        #if found_abbreviations:
+        #    global_abbreviations[term_id].update(found_abbreviations)
             
-        mapping[new_id] = {'DOID': term_id}
-        count += 1
+        #mapping[term_id] = {'DOID': term_id}
 
+    formatted_mapping = {
+        dis_id.replace(':', '_'): [m.replace(':', '_') for m in maps] 
+        for dis_id, maps in mapping.items()
+    }
     with open(OUTPUT_MAPPING, "w", encoding="utf-8") as f:
-        json.dump(mapping, f, indent=2)
+        json.dump(formatted_mapping, f, indent=2)
 
     # 4. Dump Synonyms
     print(f"Writing synonyms to {OUTPUT_SYNONYMS}...")
     with open(OUTPUT_SYNONYMS, "w", encoding="utf-8") as f:
-        for dis_id in sorted(global_synonyms.keys(), key=lambda x: int(x.split('_')[1])):
+        for dis_id in sorted(global_synonyms.keys(), key=lambda x: int(x.split(':')[1])):
             syns = sorted(list(global_synonyms[dis_id]))
             formatted_syns = "|".join(syns)
-            f.write(f"{dis_id}:{formatted_syns}\n")
+            formatted_id = dis_id.replace(':', '_')
+            f.write(f"{formatted_id}:{formatted_syns}\n")
 
     # 5. Dump Abbreviations
     print(f"Writing abbreviations to {OUTPUT_ABBREVIATIONS}...")
     with open(OUTPUT_ABBREVIATIONS, "w", encoding="utf-8") as f:
-        for dis_id in sorted(global_abbreviations.keys(), key=lambda x: int(x.split('_')[1])):
+        for dis_id in sorted(global_abbreviations.keys(), key=lambda x: int(x.split(':')[1])):
             abbrs_raw = sorted(list(global_abbreviations[dis_id]))
             abbrs = [f'{a}@EXACT' for a in abbrs_raw]
+            formatted_id = dis_id.replace(':', '_')
             if len(abbrs) > 0:
                 formatted_abbrs = "|".join(abbrs)
-                f.write(f"{dis_id}:{formatted_abbrs}\n")
+                f.write(f"{formatted_id}:{formatted_abbrs}\n")
 
     print("Done!")
 

@@ -1,13 +1,10 @@
 from abc import ABC, abstractmethod
-from collections import defaultdict
 import re
-import json
-import pandas as pd
-from src.models import (CandidateHit, NormalizedHit, NormalizationResult, NormalizationTargetType, NormalizationStatus, NormalizationContext)
 from typing import Iterable, Optional
-from src.resources import MirResourceLoader, MirNormalizationResources
-from src.sentence_utils import SentenceReader
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from textmining.models import CandidateHit, NormalizedHit, NormalizationResult, NormalizationTargetType, NormalizationStatus, NormalizationContext
+from textmining.resources import MirNormalizationResources
+from textmining.sentence_utils import SentenceReader
 
 @dataclass
 class MirNormalizationCandidate:

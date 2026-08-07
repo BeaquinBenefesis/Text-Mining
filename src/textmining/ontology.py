@@ -5,7 +5,20 @@ from collections import defaultdict
 import re
 import tempfile
 from pathlib import Path
+import datetime
 
+def to_external_id(term_id: str) -> str:
+    if ":" not in term_id:
+        return term_id
+    prefix, local_id = term_id.split(":", 1)
+    return f"{prefix}_{local_id}"
+def to_internal_id(term_id: str) -> str:
+    if ":" in term_id:
+        return term_id
+    if "_" not in term_id:
+        return term_id
+    prefix, local_id = term_id.split("_", 1)
+    return f"{prefix}:{local_id}"
 
 def read_obo_without_gci_is_a(obo_path):
     obo_path = Path(obo_path)
@@ -33,8 +46,10 @@ def read_obo_without_gci_is_a(obo_path):
 class OntologyGraph:
     def __init__(self, graph, relationship):
         self.graph = graph
+        print(f'Reading complete {datetime.datetime.now()}')
         self.relationship = relationship
         self._rel_subgraph = self._build_relationship_subgraph()
+        print(f'Filtering complete {datetime.datetime.now()}')
         if not nx.is_directed_acyclic_graph(self._rel_subgraph):
             raise nx.NetworkXError("LCA only defined on directed acyclic graphs.")
         if len(self._rel_subgraph) == 0:
@@ -42,7 +57,9 @@ class OntologyGraph:
         self.roots = self._find_roots()
         self._ancestor_cache = {}
         self._depths = self._compute_depths()
-        self._descendants_counts = self._descendant_counts()
+        print(f'Depths computed {datetime.datetime.now()}')
+        self._descendant_counts_cache = self._descendant_counts()
+        print(f'Ancestor counts computed {datetime.datetime.now()}')
         self._node_num = self._rel_subgraph.number_of_nodes()
     
     @classmethod
@@ -54,38 +71,42 @@ class OntologyGraph:
         return cls(cls.merge_ontologies(obo_paths, equivalence_fn), relationship)
     
     @staticmethod
-    def merge_ontologies(graphs: list[nx.MultiDiGraph], equivalence_fn):
+    def merge_ontologies(obo_paths: list[str], equivalence_fn):
         merged_raw = nx.MultiDiGraph()
-        for g in graphs:
-            raw_g = read_obo_without_gci_is_a(g)
-            merged_raw.add_nodes_from(raw_g.nodes)
-            merged_raw.add_edges_from(raw_g.edges)
+
+        for path in obo_paths:
+            raw_g = read_obo_without_gci_is_a(path)
+            merged_raw.add_nodes_from(raw_g.nodes(data=True))
+            merged_raw.add_edges_from(raw_g.edges(keys=True, data=True))
+
         uf = UnionFind()
-        
         for node in merged_raw.nodes:
             uf.add(node)
-        
+
         for node, data in merged_raw.nodes(data=True):
             for eq_id in equivalence_fn(node, data):
-                uf.union(node, eq_id)
-        
+                if eq_id in merged_raw:
+                    uf.union(node, eq_id)
+
         classes = defaultdict(set)
         for node in merged_raw.nodes:
             repr_n = uf.find(node)
-            classes[repr_n] = node
-        
+            classes[repr_n].add(node)
+
         contracted = nx.MultiDiGraph()
+
         for repr_n, members in classes.items():
             contracted.add_node(repr_n, members=members)
-        
+
         for u, v, k, data in merged_raw.edges(keys=True, data=True):
             repr_u = uf.find(u)
             repr_v = uf.find(v)
             if repr_u == repr_v:
                 continue
-            contracted.add_edge(u, v, key=k, **data)
-        
+            contracted.add_edge(repr_u, repr_v, key=k, **data)
+
         return contracted
+
         
     
     def _build_relationship_subgraph(self):
@@ -133,6 +154,7 @@ class OntologyGraph:
         }
     
     def find_lca(self, *term_ids):
+        term_ids = [to_internal_id(t) for t in term_ids]
         common_ancestors = set.intersection(*[self.ancestors(t) | {t} for t in term_ids])
         if not common_ancestors:
             return None
@@ -141,13 +163,17 @@ class OntologyGraph:
         lcas = [a for a in common_ancestors if self._depths[a] == max_depth]
 
         if len(lcas) == 1:
-            return lcas[0]
+            return to_external_id(lcas[0])
 
-        return max(lcas, key=lambda a: (self.compute_ic(a), a))
+        return max(to_external_id(lcas), key=lambda a: (self.compute_ic(a), a))
         
     def compute_ic(self, term_id):
-        freq = self._descendant_counts[term_id] / self._node_num
-        return -math.log(freq)
+        cached_count = self._descendant_counts_cache.get(term_id, None)
+        if cached_count:
+            freq = cached_count / self._node_num
+            return -math.log(freq)
+        else:
+            raise ValueError(f'Can not compute information content for unknown id: {term_id, self.graph}')
 
 class UnionFind:
     def __init__(self):
@@ -180,7 +206,10 @@ def disease_equivalence_fn(mondo_id: str, mondo_data: dict):
         if m:
             exact_matches.append(m.group(1))
     return exact_matches
-            
 
+print(datetime.datetime.now())
+tax_onto = OntologyGraph.from_obo('/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/taxonomy/ncbi_taxonomy.obo')
+print(tax_onto.find_lca('NCBITaxon_915388', 'NCBITaxon_995317'))
+print(datetime.datetime.now())
 
 

@@ -1,8 +1,7 @@
 from typing import Iterator
-from src.models import NormalizedHit, NormalizationStatus, HitType, Association
 from itertools import groupby, combinations
 from collections import Counter
-
+from textmining.models import NormalizedHit, NormalizationStatus, HitType, Association
 
 class Grouper:
     

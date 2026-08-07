@@ -5,7 +5,7 @@ from NormUtils import MirNormalizer, DefaultNormalizer
 from models import HitType
 from Processor import Processor
 from tqdm import tqdm
-from Grouper import Grouper
+from src.textmining.analysis import Grouper
 import time
 
 hits = '/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/everything/sample.hits'

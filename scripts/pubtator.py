@@ -1,7 +1,7 @@
 from bioc import pubtator
 
-corpus_path = '/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/validation/disease/NCBI_disease/raw/NCBItestset_corpus.txt'
-name_out = 'NCBItestset_corpus'
+corpus_path = '/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/validation/disease/NCBI_disease/raw/NCBItrainset_corpus.txt'
+name_out = 'NCBItrainset_corpus'
 sentences = f'/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/validation/disease/NCBI_disease/processed_text/{name_out}.sent'
 annotations_path = f'/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/validation/disease/NCBI_disease/model_hits/{name_out}.hits'
 
@@ -22,5 +22,5 @@ with open(sentences, 'w') as sent_out, \
         
         # Write hits
         for ann in doc.annotations:
-            hits_out.write(f'{id}\t{ann.id}\t{ann.text}\t{ann.start}\t{ann.end-ann.start}\t{ann.type}\n')
+            hits_out.write(f'{id}\t{ann.id}\t{ann.text}\t{ann.start}\t{ann.end-ann.start}\tDISEASE\t{ann.type}\n')
         
