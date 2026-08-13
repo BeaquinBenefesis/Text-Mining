@@ -7,7 +7,7 @@ from src.textmining.article_utils import ArticleSource, ArticleRecord
 from collections import defaultdict
 import json
 from typing import Iterator
-from src.textmining.ontology import OntologyGraph, disease_equivalence_fn
+from src.textmining.ontology import OntologyGraph
 import csv
 from pathlib import Path
 
