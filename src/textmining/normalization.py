@@ -1,10 +1,13 @@
 from abc import ABC, abstractmethod
 import re
+import logging
 from typing import Iterable, Optional
 from dataclasses import dataclass
 from textmining.models import CandidateHit, NormalizedHit, NormalizationResult, NormalizationTargetType, NormalizationStatus, NormalizationContext
-from textmining.resources import MirNormalizationResources
+from textmining.normalization_resources import MirNormalizationResources
 from textmining.sentence_utils import SentenceReader
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MirNormalizationCandidate:
@@ -31,6 +34,7 @@ class MirNormalizer(EntityNormalizer):
         super().__init__()  
         self.sentence_reader = sentence_reader
         self.resources = resources
+        logger.info("Initialized MirNormalizer")
         
     def normalize(self, hit: CandidateHit, normalization_context: NormalizationContext) -> Iterable['NormalizedHit']:
         buffer_out = []
@@ -40,10 +44,15 @@ class MirNormalizer(EntityNormalizer):
         sentence_id = hit.sentence_id
         
         if mirna_body is None:
+            logger.error("Unresolved miRNA entity id=%s at sentence=%s", hit.entity_id, sentence_id)
             raise ValueError(f'Unresolved miRNA entity id: {hit.entity_id}')
 
         # NO SUFFIX = FILTER
         if not suffix_groups and mirna_body != 'bantam':
+            logger.debug(
+                "Filtering hit with no suffix: entity_id=%s, sentence=%s, raw_text=%r",
+                hit.entity_id, sentence_id, hit.raw_text,
+            )
             normalized_hit = NormalizedHit.from_candidate(hit,  NormalizationResult(NormalizationStatus.FILTERED))
             buffer_out.append(normalized_hit)
             return buffer_out
@@ -56,6 +65,7 @@ class MirNormalizer(EntityNormalizer):
                 
         norm_candidates: list[MirNormalizationCandidate] = []
         if not normalized_prefix:
+            logger.debug("No prefix for entity_id=%s; attempting inference (sentence=%s)", hit.entity_id, sentence_id)
             taxon_relevance = normalization_context.get_taxon_relevance()
             norm_candidates.extend(self._resolve_missing_prefix(sentence_id=sentence_id,
                                                                 mirna_body=mirna_body,
@@ -63,13 +73,16 @@ class MirNormalizer(EntityNormalizer):
                                                                 relevant_taxons=taxon_relevance.keys())
             )
         else:
-            norm_results = self._map_to_accession(prefix=normalized_prefix,
+            norm_result = self._map_to_accession(prefix=normalized_prefix,
                                                   mirna_body=mirna_body,
                                                   suffix=combined_suffix)
-            norm_candidates.extend(MirNormalizationCandidate(normalization=r, 
+            norm_candidates.append(MirNormalizationCandidate(normalization=norm_result, 
                                                              prefix=normalized_prefix,
-                                                             suffix=combined_suffix) for r in norm_results)
+                                                             suffix=combined_suffix))
             
+        statuses = [c.normalization.status for c in norm_candidates]
+        logger.debug("Normalized hit entity_id=%s -> %d candidate(s), statuses=%s", hit.entity_id, len(norm_candidates), statuses)
+       
         for norm_candidate in norm_candidates:
             buffer_out.append(NormalizedHit.from_candidate(hit, 
                                                            normalization=norm_candidate.normalization, 
@@ -86,13 +99,18 @@ class MirNormalizer(EntityNormalizer):
         family_accession = self.resources.family_normalizer.get(mirna_with_suffix, None)
         
         if family_accession and (not mirbase_prefixes or self._is_family_sentence(sentence_id)):
-            norm_result = NormalizationResult(NormalizationStatus.FALLBACK, family_accession, NormalizationTargetType.MIR_FAMILY)
+            norm_result = NormalizationResult(status=NormalizationStatus.FALLBACK, 
+                                              normalized_id=family_accession, 
+                                              target_type=NormalizationTargetType.MIR_FAMILY)
             return [MirNormalizationCandidate(normalization=norm_result)]
         elif not mirbase_prefixes:
             norm_result = NormalizationResult(NormalizationStatus.UNRESOLVED)
             return [MirNormalizationCandidate(normalization=norm_result)]
         else:
-            return self._resolve_by_prefix_intersection(mirna_with_suffix, implied_prefixes, mirbase_prefixes)
+            return self._resolve_by_prefix_intersection(mirna_body=mirna_body,
+                                                        suffix=mirna_suffix,
+                                                        implied_prefixes=implied_prefixes,
+                                                        mirbase_prefixes=mirbase_prefixes)
                 
     # This returns the set of prefixes mentioned in the article
     def _get_implied_prefixes(self, relevant_taxons) -> set:
@@ -103,6 +121,10 @@ class MirNormalizer(EntityNormalizer):
         matches = []
         possible_prefixes = implied_prefixes & mirbase_prefixes
         if not possible_prefixes:
+            logger.debug(
+                "Prefix intersection empty for mirna_body=%s: implied=%s, mirbase=%s",
+                mirna_body, implied_prefixes, mirbase_prefixes,
+            )
             norm_result = NormalizationResult(NormalizationStatus.UNRESOLVED)
             matches.append(MirNormalizationCandidate(normalization=norm_result))
         else:

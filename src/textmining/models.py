@@ -1,33 +1,12 @@
 from dataclasses import dataclass, field, replace
 from typing import Optional
-from enum import Enum
 from natsort import natsort_key
 from collections import defaultdict
 from textmining.scoring import HitScore
 from textmining.sentence_utils import parse_sentence_id
+from textmining.types import HitType, SynonymType, GroupStatus, NormalizationStatus, NormalizationTargetType
 
-
-class GroupStatus(str, Enum):
-    DEFAULT = 'DEFAULT' # No disambiguation performed
-    EXACT_MATCH = 'EXACT_MATCH'
-    RESOLVED = 'RESOLVED'
-    AMBIGUOUS = 'AMBIGUOUS'
-    FAILURE = 'FAILURE'
-
-class HitType(str, Enum):
-    MIR = 'MIR'
-    TAXON = 'TAXON'
-    DISEASE = 'DISEASE'
-    TISSUE = 'TISSUE'
-    CELL = 'CELL'
-    PATHWAY = 'PATHWAY'
-
-class SynonymType(str, Enum):
-    STANDARD = 'STANDARD'
-    ABBREVIATION = 'ABBREVIATION'
-    INFERRED_ABBREVIATION = 'INFERRED_ABBREVIATION'
-
-@dataclass
+@dataclass(kw_only=True)
 class CandidateHit:
     entity_type: HitType
     synonym_type: SynonymType
@@ -87,19 +66,6 @@ class HitGroup:
     def entity_type_set(self) -> set[HitType]:
         return {h.entity_type for h in self.hits}
         
-class NormalizationStatus(str, Enum):
-    NORMALIZED = 'NORMALIZED' # Successful exact normalization
-    FALLBACK = 'FALLBACK' # Normalized using a fallback heuristic
-    #AMBIGUOUS = 'AMBIGUOUS' # Normalization matched multiple entities
-    UNRESOLVED = 'UNRESOLVED' # Could not normalize
-    FILTERED = 'FILTERED' # Probably a false positive, filter out
-    IN_BLACKLIST = 'IN_BLACKLIST' # Known terms of high ambiguity, low confidence hit
-
-class NormalizationTargetType(str, Enum):
-    MIR_FAMILY = 'MIR_FAMILY'
-    MIR_PRECURSOR = 'MIR_PRECURSOR'
-    MIR_MATURE = 'MIR_MATURE'
-
 @dataclass
 class NormalizationResult:
     status: NormalizationStatus
@@ -114,7 +80,7 @@ class Association:
     entity_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
 
-@dataclass
+@dataclass(kw_only=True)
 class NormalizedHit(CandidateHit):
     normalization: NormalizationResult
     score: Optional[HitScore] = None
@@ -138,6 +104,26 @@ class NormalizedHit(CandidateHit):
             prefix=changes.get('prefix', candidate.prefix),
             suffix=changes.get('suffix', candidate.suffix),
             normalization=normalization)
+    
+    def to_dict(self) -> dict:
+        return {
+            "sentence_id": self.sentence_id,
+            "entity_type": self.entity_type.name if self.entity_type else None,
+            "synonym_type": self.synonym_type.name if self.synonym_type else None,
+            "synonym_id": self.synonym_id,
+            "entity_id": self.entity_id,
+            "raw_text": self.raw_text,
+            "start_position": self.start_position,
+            "hit_length": self.hit_length,
+            "synonym": self.synonym,
+            "prefix": self.prefix,
+            "suffix": self.suffix,
+            "norm_status": self.normalization.status.name if self.normalization.status else None,
+            "normalized_id": self.normalization.normalized_id,
+            "target_type": self.normalization.target_type.name if self.normalization.target_type else None,
+            "dead": self.normalization.dead,
+            "score": f"{float(self.score.ic):.2f}" if self.score is not None and self.score.ic is not None else None,
+        }
         
 class NormalizationContext:
     def __init__(self):

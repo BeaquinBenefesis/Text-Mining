@@ -2,11 +2,13 @@ import subprocess
 import os
 import tempfile
 import glob
+import logging
 from itertools import zip_longest
 from typing import Iterator, Optional
 from collections import Counter
 from dataclasses import dataclass, field
-from textmining.models import HitType, SynonymType, HitGroup, GroupStatus, CandidateHit
+from textmining.types import HitType, SynonymType, GroupStatus
+from textmining.models import HitGroup, CandidateHit
 from textmining.article_utils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
 from textmining.ontology import OntologyGraph
 from textmining.synonym_utils import MultiSynFileReader
@@ -15,7 +17,9 @@ from textmining.synonym_utils import MultiSynFileReader
 _SYNGREP_COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position", "hit_length","synonym","prefix","suffix"]
 _GOLD_COL_NAMES = ["sentence_id", "entity_id", "matched_text", "start_position", "hit_length", "entity_type", "mention_type"]
 
-class HitsProcessor:
+logger = logging.getLogger(__name__)
+
+class HitProcessor:
 
     def __init__(self, 
                  hits_path: str, 
@@ -26,21 +30,28 @@ class HitsProcessor:
         
         self.hits_path = hits_path
         self.low_memory = low_memory
-        self.type_map = HitsProcessor.parse_synfile_type_map(synfile_type_map)
-        self.synfile_map = HitsProcessor.parse_synfile_map(synfile_map)
+        self.type_map = HitProcessor.parse_synfile_type_map(synfile_type_map)
+        self.synfile_map = HitProcessor.parse_synfile_map(synfile_map)
         self.synonym_paths = self.synfile_map.values()
         self.file_id_to_type = {
             syn_id: self.type_map[os.path.basename(path)]
             for syn_id, path in self.synfile_map.items()
         }
         self.type_to_ontology = type_to_ontology
-        self.history = HitsProcessorHistory()
-    
+        self.history = HitProcessorHistory()
+        logger.info(
+            "Initialized HitProcessor: hits_path=%s, %d synonym files, low_memory=%s",
+            hits_path, len(self.synfile_map), low_memory,
+        )
+        logger.debug("synfile_map=%s", self.synfile_map)
+        
     def read_articles(self,
                       source:ArticleSource = ArticleSource.SYSTEM,
                       remove_sent_id_prefix=True, 
-                      sort=False, 
-                      print_summary=True,) -> Iterator[ArticleRecord]:
+                      sort=False,
+                      print_summary=True,
+                      parallel=4,
+                      memory_cap=10) -> Iterator[ArticleRecord]:
         
         sorted_path = None
         try:
@@ -48,26 +59,40 @@ class HitsProcessor:
             if sort:
                 sorted_fd, sorted_path = tempfile.mkstemp()
                 os.close(sorted_fd)
-                subprocess.run(
-                    ['sort', '-t\t', '-k1,1V', '-k4,4n', self.hits_path, '-o', sorted_path],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                hits_path = sorted_path
+                env = os.environ.copy()
+                env["LC_ALL"] = "C"
 
-            hits_iter = self._iter_syngrep_hits(hits_path=hits_path, 
-                                                remove_sent_id_prefix=remove_sent_id_prefix) if source == ArticleSource.SYSTEM else self._iter_gold_hits(hits_path)
+                cmd = [
+                    'sort', f'--parallel={parallel}', '-S', f'{memory_cap}G',
+                    '-t\t', '-k1,1V', '-k4,4n', '-k5,5n',
+                    str(self.hits_path), '-o', str(sorted_path),
+                ]
+                logger.info("Sorting hits: %s", ' '.join(cmd))
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+                except subprocess.CalledProcessError as e:
+                    logger.critical("External sort failed (rc=%d): %s", e.returncode, e.stderr)
+                    raise
+                hits_path = sorted_path
+                logger.info("Sorted hits written to tmp file: %s", sorted_path)
+
+            hits_iter = (self._iter_syngrep_hits(hits_path=hits_path, remove_sent_id_prefix=remove_sent_id_prefix)
+                        if source == ArticleSource.SYSTEM else self._iter_gold_hits(hits_path))
             articles_iter = self._iter_articles(hits_iter, source)
             
             yield from articles_iter
 
             if print_summary:
                 self.history.print_summary()
-
+                logger.info(
+                    "HitProcessor run complete: articles=%d, input_hits=%d, output_hits=%d, resolution_rate=%.2%%",
+                    self.history.articles_processed, self.history.input_hits,
+                    self.history.output_hits, self.history.resolution_rate * 100,
+                )
         finally:
             if sorted_path and os.path.exists(sorted_path):
                 os.remove(sorted_path)
+                logger.debug("Removed tmp sorted file: %s", sorted_path)
     
     def _iter_articles(self, hits: Iterator[CandidateHit], source) -> Iterator[ArticleRecord]:
         prev_hit = None
@@ -76,6 +101,10 @@ class HitsProcessor:
         for hit in hits:
             self.history.record_input_hit(hit)
             if prev_hit and not prev_hit.sort_key <= hit.sort_key:
+                logger.critical(
+                    "Hits not sorted: prev=%s (sort_key=%s), current=%s (sort_key=%s)",
+                    prev_hit.synonym_id, prev_hit.sort_key, hit.synonym_id, hit.sort_key,
+                )
                 raise ValueError(f"Hits are not sorted. Can not resolve ambiguous hits! "
                                 f"Previous hit: { prev_hit.sort_key}, current hit: {hit.sort_key}")
             current_article = hit.article_id
@@ -93,9 +122,9 @@ class HitsProcessor:
             raise ValueError('Empty hit buffer passed to create ArticleRecord')
         self.history.record_article()
         if source == ArticleSource.SYSTEM:
-            hit_groups = HitsProcessor._group_hits_by_span(article_hits)
+            hit_groups = HitProcessor._group_hits_by_span(article_hits)
             article_metadata = ArticleMetadata(article_id=article_hits[0].article_id)
-            article_evidence = HitsProcessor._collect_article_evidence(hit_groups=hit_groups)
+            article_evidence = HitProcessor._collect_article_evidence(hit_groups=hit_groups)
             resolved_hits = self._resolve_groups(hit_groups=hit_groups, article_evidence=article_evidence)
             return ArticleRecord(metadata=article_metadata, 
                                 hits=article_hits, 
@@ -103,7 +132,7 @@ class HitsProcessor:
                                 evidence=article_evidence, 
                                 resolved_hits=resolved_hits)
         elif source == ArticleSource.GOLD:
-            hit_groups = HitsProcessor._group_hits_by_span(article_hits)
+            hit_groups = HitProcessor._group_hits_by_span(article_hits)
             return ArticleRecord(metadata=ArticleMetadata(article_id=article_hits[0].article_id),
                                 hits=article_hits,
                                 groups=hit_groups,
@@ -119,6 +148,13 @@ class HitsProcessor:
                 g.group_status = GroupStatus.EXACT_MATCH
                 resolved_hits.append(g.get_first())
                 continue
+            
+            logger.debug(
+                "Disambiguating group at %s: %d hits, ambiguous=%s, has_abbrev=%s",
+                g.get_first().sort_key if g.get_first() else None,
+                len(g.hits), g.is_ambiguous(), g.contains_any_abbreviation(),
+            )
+            
             filtered_hits = None
             if g.contains_inferred_abbreviation():
                 # From abbreviation candidates (inferred and non-inferred ones), keep only the inferred abbreviations
@@ -129,6 +165,7 @@ class HitsProcessor:
                 filtered_hits = g.hits
             if not filtered_hits:
                 g.group_status = GroupStatus.FAILURE
+                logger.debug("Group resolution FAILED: no candidates left after filtering")
                 continue
             implied_ids = {h.entity_id for h in filtered_hits}
             if len(implied_ids) == 1:
@@ -147,23 +184,27 @@ class HitsProcessor:
             else:
                 entity_type_set = g.entity_type_set()
                 if len(entity_type_set) != 1:
-                   g.group_status = GroupStatus.AMBIGUOUS
-                   continue
+                    logger.debug("Group AMBIGUOUS_ENTITY_TYPE: types=%s", entity_type_set)
+                    g.group_status = GroupStatus.AMBIGUOUS_ENTITY_TYPE
+                    continue
                 entity_type = next(iter(entity_type_set))
                 ontology = self.type_to_ontology.get(entity_type, None)
                 if not ontology:
-                    g.group_status = GroupStatus.AMBIGUOUS
+                    logger.warning("No ontology configured for entity_type=%s; leaving group AMBIGUOUS_ID", entity_type)
+                    g.group_status = GroupStatus.AMBIGUOUS_ID
                     continue
                 lca = ontology.find_lca(*implied_ids)             
                 
                 if not lca:
-                    g.group_status = GroupStatus.AMBIGUOUS
+                    logger.debug("No LCA found for implied_ids=%s (type=%s)", implied_ids, entity_type)
+                    g.group_status = GroupStatus.AMBIGUOUS_ID
                     continue
                 else:
                     template = next(h for h in filtered_hits if h.entity_id in implied_ids)
                     inferred_hit = template.copy(entity_id=lca)
                     resolved_hits.append(inferred_hit)
                     g.group_status = GroupStatus.RESOLVED
+                    logger.debug("Resolved group via LCA: implied_ids=%s -> lca=%s", implied_ids, lca)
         
         # RECORDING
         for g in hit_groups:
@@ -212,13 +253,18 @@ class HitsProcessor:
                 is_inferred_abbrev = len(synonym_parts) == 3
 
                 if file_id not in self.synfile_map:
+                    logger.error("No synonym file mapped for key: %s", file_id)
                     raise KeyError(f"No synonym file mapped for key: {file_id!r}")
 
                 hit_type, is_abbrev = self.file_id_to_type[file_id]
 
+        
                 if is_inferred_abbrev and is_abbrev:
-                    print(self.file_id_to_type)
-                    raise RuntimeError(f'Found hit that is an abbreviation and an inferred abbreviation!\n{line}')
+                    logger.error("Found hit that is an abbreviation and an inferred abbreviation!")
+                    #TODO: For now just skip, change later
+                    continue
+                    #print(self.file_id_to_type)
+                    #raise RuntimeError(f'Found hit that is an abbreviation and an inferred abbreviation!\n{line}')
                 elif is_inferred_abbrev:
                     synonym_type = SynonymType.INFERRED_ABBREVIATION
                 elif is_abbrev:
@@ -231,7 +277,15 @@ class HitsProcessor:
                     sentence_id = sentence_id.split(':', 1)[1]
 
                 file_path = self.synfile_map[file_id]
-                entity_id = reader.extract_id(file_path, line_number)
+                raw_entity_id = reader.extract_id(file_path, line_number)
+
+                if hit_type == HitType.MIR:
+                    entity_id = raw_entity_id
+                else:
+                    entity_id = self.type_to_ontology[hit_type].resolve_id(raw_entity_id)
+                    if not entity_id:
+                        logger.error('Could not resolve id: %s', raw_entity_id)
+                        continue
 
                 yield CandidateHit(
                     entity_type=hit_type,
@@ -306,8 +360,8 @@ class HitsProcessor:
 
 
 @dataclass
-class HitsProcessorHistory:
-    """Tracks stats across the raw-hit -> group -> resolved-hit pipeline in HitsProcessor."""
+class HitProcessorHistory:
+    """Tracks stats across the raw-hit -> group -> resolved-hit pipeline in HitProcessor."""
 
     input_hits: int = 0
     output_hits: int = 0
@@ -353,7 +407,7 @@ class HitsProcessorHistory:
 
         if group.group_status in (GroupStatus.EXACT_MATCH, GroupStatus.RESOLVED):
             self.resolved_synonym_counts[synonym_key] += 1
-        elif group.group_status in (GroupStatus.AMBIGUOUS, GroupStatus.FAILURE):
+        elif group.group_status in (GroupStatus.AMBIGUOUS_ENTITY_TYPE, GroupStatus.FAILURE, GroupStatus.AMBIGUOUS_ID):
             self.unresolved_synonym_counts[synonym_key] += 1
 
     def record_output_hit(self, hit: CandidateHit) -> None:
@@ -402,7 +456,7 @@ class HitsProcessorHistory:
         return self.unresolved_synonym_counts.most_common(n)
 
     def print_summary(self, top_n: int = 10) -> None:
-        print(f"{'--- HitsProcessor Summary ---':^40}")
+        print(f"{'--- HitProcessor Summary ---':^40}")
         print(f"Articles Processed:      {self.articles_processed}")
         print(f"Input Hits:              {self.input_hits}")
         print(f"Output Hits:             {self.output_hits}")

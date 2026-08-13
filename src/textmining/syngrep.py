@@ -1,7 +1,10 @@
-from .models import HitType
 import subprocess
+import logging
 from dataclasses import dataclass
 import os
+from textmining.types import HitType
+
+logger = logging.getLogger(__name__)
 
 SYNGREP_PATH = '/home/proj/software/own/syngrep/syngrepJavaOnGrid.sh'
 
@@ -14,6 +17,10 @@ class SynGrepResult:
     synfile_type_map_path: str
 
 def _write_synfile_type_map(synonyms: dict[HitType, list[str]], abbrevs: dict[HitType, list[str]], path: str):
+    logger.debug(
+        "Writing synfile type map to %s: %d synonym type(s), %d abbrev type(s)",
+        path, len(synonyms), len(abbrevs),
+    )
     with open(path, 'w') as fh:
         for hit_type, paths in synonyms.items():
             for p in paths:
@@ -33,7 +40,10 @@ def run_syngrep(sentence_pattern: str,
                 abbrev: bool = True,
                 syngrep_script: str = SYNGREP_PATH) -> SynGrepResult:
     os.makedirs(output_dir, exist_ok=True)
-    print('Starting syngrep task...')
+    logger.info(
+        "Starting syngrep task: output_name=%s, output_dir=%s, ntasks=%d, abbrev=%s",
+        output_name, output_dir, ntasks, abbrev,
+    )
     synfile_map_path = None
     synfile_type_map_path = None
     raw_synonyms = [p for paths in synonyms.values() for p in paths]
@@ -41,11 +51,15 @@ def run_syngrep(sentence_pattern: str,
     combined = []
     combined.extend(raw_synonyms)
     combined.extend(raw_abbrevs)
+    logger.debug(
+        "Synonym files: %d standard, %d abbrev, entity types=%s",
+        len(raw_synonyms), len(raw_abbrevs), [t.name for t in synonyms.keys()],
+    )
     program_args = ['-wordChar', word_char, '-syn', *combined]
-    
+
     if abbrev:
         program_args.extend(['-abbrev', 'relaxed'])
-    
+
     if within_word:
         program_args.extend(['-withinWord', *[os.path.basename(p) for p in within_word]])
 
@@ -56,14 +70,22 @@ def run_syngrep(sentence_pattern: str,
            '--out', out,
            '--wd', output_dir,
            '--', *program_args]
-    parameter_string = ' '.join(cmd)
-    print(f'Running with parameters:\n{parameter_string}')
+    parameter_string = ' '.join(str(arg) for arg in cmd)
+    logger.info("Running syngrep with parameters:\n%s", parameter_string)
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        synfile_map_path = os.path.join(output_dir, 'synfile.map')
         synfile_type_map_path = os.path.join(output_dir, 'synfile_type.map')
-        _write_synfile_type_map(synonyms, abbrev_synonyms,synfile_type_map_path)
+        _write_synfile_type_map(synonyms, abbrev_synonyms, synfile_type_map_path)
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        logger.debug("syngrep stdout:\n%s", result.stdout)
+        if result.stderr:
+            logger.debug("syngrep stderr:\n%s", result.stderr)
+        synfile_map_path = os.path.join(output_dir, 'synfile.map')
+        logger.info("syngrep completed successfully: hits=%s.hits", out)
     except subprocess.CalledProcessError as e:
+        logger.error(
+            "syngrep failed (exit %d)\nstdout:\n%s\nstderr:\n%s",
+            e.returncode, e.stdout, e.stderr,
+        )
         raise RuntimeError(
             f'syngrep failed (exit {e.returncode}):\n'
             f'stdout:\n{e.stdout}\nstderr:\n{e.stderr}'
@@ -76,5 +98,3 @@ def run_syngrep(sentence_pattern: str,
         synfile_map_path=synfile_map_path,
         synfile_type_map_path=synfile_type_map_path,
     )
-
-

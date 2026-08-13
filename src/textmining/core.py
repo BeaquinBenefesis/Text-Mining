@@ -1,31 +1,40 @@
 from typing import Iterator
-from models import NormalizedHit, CandidateHit, NormalizationContext
 from collections import Counter
 from dataclasses import dataclass, field
-from scoring import HitScorer
-from textmining.hit_utils import HitsProcessor, HitType
+import logging
+from textmining.scoring import HitScorer
 from textmining.article_utils import ArticleSource, ArticleRecord
 from textmining.normalization import EntityNormalizer
+from textmining.models import NormalizedHit, CandidateHit, NormalizationContext
+from textmining.types import HitType, NormalizationStatus
+from textmining.hit_utils import HitProcessor
 
+logger = logging.getLogger(__name__)
 
 class Processor:
     def __init__(self,
-                 hits_processor: HitsProcessor,
+                 hits_processor: HitProcessor,
                  normalizers: dict[HitType, EntityNormalizer],
                  scorer: HitScorer):
         
         self.hits_processor = hits_processor       
         self.normalizers = normalizers
         self.scorer = scorer
-        self.processor_history = ProcessorHistory()
+        self.core_history = ProcessorHistory()
+        logger.info("Core processor initialized")
    
     def _normalize_article(self, article: ArticleRecord, normalization_context: NormalizationContext) -> list[NormalizedHit]:
         normalized_hits: NormalizedHit = []
         for candidate_hit in article.resolved_hits:
+            self.core_history.record_input_hit(candidate_hit)
             normalizer = self.normalizers[candidate_hit.entity_type]
             normalized_hits.extend(normalizer.normalize(candidate_hit, normalization_context))
         for normalized_hit in normalized_hits:
-            normalized_hit.score = self.scorer.compute_score(normalized_hit.entity_type, normalized_hit.normalization.normalized_id)
+            norm_status = normalized_hit.normalization.status
+            if not normalized_hit.normalization.dead and (norm_status == NormalizationStatus.NORMALIZED 
+                                                          or norm_status == NormalizationStatus.FALLBACK):
+                normalized_hit.score = self.scorer.compute_score(normalized_hit.entity_type, normalized_hit.normalization.normalized_id)
+                self.core_history.record_output_hit(normalized_hit)
         return normalized_hits
                  
     def get_normalized_article_stream(self,
@@ -37,6 +46,7 @@ class Processor:
                                                          print_summary=print_summary):
             context = Processor._build_normalization_context(article.resolved_hits)
             article.normalized_hits = self._normalize_article(article, context)
+            self.core_history.record_article()
             yield article
             
     
@@ -52,13 +62,13 @@ class Processor:
 class ProcessorHistory: 
     input_hits: int = 0
     output_hits: int = 0
-    articles_processed: int = 0
     dead_hits: int = 0
     entity_types: Counter = field(default_factory=Counter)
     normalization_statuses: Counter = field(default_factory=Counter)
     target_types: Counter = field(default_factory=Counter)
+    articles_processed: int = 0
     
-    def record_input_hit(self, hit: NormalizedHit):
+    def record_input_hit(self, hit: CandidateHit):
         self.input_hits += 1
         self.entity_types[hit.entity_type] += 1
     

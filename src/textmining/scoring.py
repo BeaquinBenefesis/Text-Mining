@@ -1,6 +1,7 @@
-from models import HitType
-from src.textmining.ontology import OntologyGraph
 from dataclasses import dataclass
+from textmining.types import HitType
+from textmining.ontology import OntologyGraph
+from textmining.ontology import to_internal_id
 
 @dataclass(frozen=True)
 class HitScore:
@@ -13,5 +14,6 @@ class HitScorer:
     def compute_score(self,
                      entity_type: HitType,
                      normalized_id: str):
-        ic = self.type_to_ontology[entity_type].compute_ic(normalized_id)
+        internal_id = to_internal_id(normalized_id)
+        ic = self._type_to_ontology[entity_type].compute_ic(internal_id)
         return HitScore(ic)
