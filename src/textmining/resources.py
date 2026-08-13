@@ -5,7 +5,7 @@ from pathlib import Path
 ## CORPUS
 CORPUS_DIR = Path("/mnt/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/corpus")
 SENTENCES_SORTED = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/corpus/original/everything_sorted.sent")
-
+CORPUS_SAMPLE = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/corpus/samples/sample_1.sent")
 
 ## ONTOLOGY
 ONTOLOGIES_DIR = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies")
