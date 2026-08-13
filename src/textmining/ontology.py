@@ -72,7 +72,7 @@ class OntologyGraph:
 
         self._ancestor_cache = {}
         self._depths = self._compute_depths()
-        self._descendant_counts_cache = self._descendant_counts()
+        self._descendant_counts_cache = {}
         self._node_num = self._rel_subgraph.number_of_nodes()
 
         logger.info(
@@ -204,7 +204,7 @@ class OntologyGraph:
                      not 'gci_filler' in data and
                      not 'gci_relation' in data]
 
-        return graph.edge_subgraph(rel_edges).reverse(copy=True)
+        return graph.edge_subgraph(rel_edges).reverse(copy=False)
     
     def _find_roots(self, subgraph=None):
         g = self._rel_subgraph if subgraph is None else subgraph
@@ -247,11 +247,11 @@ class OntologyGraph:
         return sub
 
     
-    def _descendant_counts(self):
-        return {
-            node_id: len(nx.descendants(self._rel_subgraph, node_id))  +1
-            for node_id in self._rel_subgraph.nodes
-        }
+#    def _descendant_counts(self):
+#        return {
+#            node_id: len(nx.descendants(self._rel_subgraph, node_id))  +1
+#            for node_id in self._rel_subgraph.nodes
+#        }
     
     def find_lca(self, *term_ids):
         term_ids = [to_internal_id(t) for t in term_ids]
@@ -268,13 +268,13 @@ class OntologyGraph:
         return max(map(to_external_id, lcas), key=lambda a: (self.compute_ic(a), a))
      
     def compute_ic(self, term_id):
-        cached_count = self._descendant_counts_cache.get(term_id, None)
-        if cached_count:
-            freq = cached_count / self._node_num
-            return -math.log(freq)
-        else:
-            logger.error('No descendant count cache computed for, %s', term_id)
-            raise ValueError(f'No descendant count cache computed for: {term_id, self.graph}')
+        if term_id not in self._descendant_counts_cache:
+            if term_id not in self._rel_subgraph:
+                logger.error('Unknown term for IC computation: %s', term_id)
+                raise ValueError(f'Unknown term id: {term_id}')
+            self._descendant_counts_cache[term_id] = len(nx.descendants(self._rel_subgraph, term_id)) + 1
+        count = self._descendant_counts_cache[term_id]
+        return -math.log(count / self._node_num)
 
     @staticmethod
     def _build_id_map(graph):
