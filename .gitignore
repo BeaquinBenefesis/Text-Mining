@@ -28,6 +28,7 @@ datasets/
 *.csv
 *.gz
 *.zip
+outputs
 
 # --- Temporary / intermediate outputs ---
 tmp/
@@ -36,3 +37,6 @@ temp/
 
 # --- Environment variables ---
 .env
+
+# Python build artifacts
+*.egg-info/
