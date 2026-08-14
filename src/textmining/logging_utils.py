@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime
 
 def setup_logging(output_dir: Path, run_name: str, level=logging.DEBUG) -> Path:
-    output_dir = Path(output_dir)
+    output_dir = output_dir / 'logs'
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = output_dir / f"{run_name}_{timestamp}.log"
@@ -21,7 +21,7 @@ def setup_logging(output_dir: Path, run_name: str, level=logging.DEBUG) -> Path:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(fmt)
 
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.INFO)  # keep console less noisy than the file
     console_handler.setFormatter(fmt)
 

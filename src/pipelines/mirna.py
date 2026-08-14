@@ -71,8 +71,10 @@ def process_mirna_hits(
     write_normalized_hits_tsv(article_stream,
                               output_path)
 
-def run_mirna_pipeline(output_name: str):
+def run_mirna_pipeline(output_name: str, sentence_path = None):
     config = MirnaPipelineConfig(output_name)
+    if sentence_path:
+        config.sentence_pattern = sentence_path
     setup_logging(output_dir=config.output_dir,
                   run_name=output_name)
     res = run_syngrep(
@@ -100,7 +102,8 @@ def run_mirna_pipeline(output_name: str):
         mature_normalizer_path=config.mature_norm_path,
         precursor_ambiguous_path=config.precursor_ambi_path,
         mature_ambiguous_path=config.mature_ambi_path,
-        taxon_obo_path=config.taxon_obo_path
+        taxon_obo_path=config.taxon_obo_path,
+        output_path=config.output_dir / f"{config.output_name}.norm"
         
     )
 
@@ -127,3 +130,4 @@ def run_existing_mirna_pipeline(config: ExistingSyngrepMirnaConfig):
         taxon_obo_path=config.taxon_obo_path
         
     )
+        

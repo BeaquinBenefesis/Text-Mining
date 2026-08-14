@@ -248,19 +248,22 @@ class HitProcessor:
 
                 synonym_id = parts['synonym_id']
                 synonym_parts = synonym_id.split(':', 2)
+                if len(synonym_parts) < 2:
+                    logger.error("Dubious synonym format: %s", line)
+                    continue
                 file_id, line_number = synonym_parts[:2]
                 line_number = int(line_number)
                 is_inferred_abbrev = len(synonym_parts) == 3
 
                 if file_id not in self.synfile_map:
-                    logger.error("No synonym file mapped for key: %s", file_id)
+                    logger.warning("No synonym file mapped for key: %s", file_id)
                     raise KeyError(f"No synonym file mapped for key: {file_id!r}")
 
                 hit_type, is_abbrev = self.file_id_to_type[file_id]
 
         
                 if is_inferred_abbrev and is_abbrev:
-                    logger.error("Found hit that is an abbreviation and an inferred abbreviation!")
+                    logger.warning("Found hit that is an abbreviation and an inferred abbreviation!")
                     #TODO: For now just skip, change later
                     continue
                     #print(self.file_id_to_type)
