@@ -17,7 +17,7 @@ def process_disease_hits(
     disease_obo_path,
     output_path,
 ):
-    disease_graph = OntologyGraph.from_obo(disease_obo_path)
+    disease_graph = OntologyGraph.from_obo(disease_obo_path, exclude_gci=True)
     type_to_ontology = {HitType.DISEASE: disease_graph}
     hits_processor = HitProcessor(hits_path=hits_path, 
                                   synfile_map=synfile_map_path, 

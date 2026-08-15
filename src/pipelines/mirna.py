@@ -1,8 +1,7 @@
-import logging
 from textmining.config import MirnaPipelineConfig, ExistingSyngrepMirnaConfig
 from textmining.syngrep import run_syngrep
 from textmining.hit_utils import HitProcessor
-from textmining.ontology import OntologyGraph, to_internal_id
+from textmining.ontology import OntologyGraph
 from textmining.models import HitType
 from textmining.normalization import MirNormalizer, DefaultNormalizer
 from textmining.scoring import HitScorer

@@ -18,7 +18,7 @@ def setup_logging(output_dir: Path, run_name: str, level=logging.DEBUG) -> Path:
     )
 
     file_handler = logging.FileHandler(log_path)
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(fmt)
 
     console_handler = logging.StreamHandler(sys.stderr)
