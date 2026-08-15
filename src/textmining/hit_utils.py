@@ -85,7 +85,7 @@ class HitProcessor:
             if print_summary:
                 self.history.print_summary()
                 logger.info(
-                    "HitProcessor run complete: articles=%d, input_hits=%d, output_hits=%d, resolution_rate=%.2%%",
+                    'HitProcessor run complete: articles=%d, input_hits=%d, output_hits=%d, resolution_rate=%.2f%%',
                     self.history.articles_processed, self.history.input_hits,
                     self.history.output_hits, self.history.resolution_rate * 100,
                 )
