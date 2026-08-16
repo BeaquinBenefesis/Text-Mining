@@ -1,93 +1,80 @@
-import networkx
-import obonet
 import argparse
-import urllib.request
-import os
-
-
-def get_links(ontologies):
-    out = []
-    with open (ontologies, 'r') as o:
-        for line in o:
-            out.append(line.strip('\n'))
-    return out
-
-def get_exact_synonyms(node_data):
-    exact_syns = []
-    
-    for s in node_data.get("synonym", []):
-        parts = s.split('"')
-        
-        if len(parts) > 2:
-            text = parts[1]
-            scope_parts = parts[2].strip().split()
-            
-            if not scope_parts:  # no scope word present, skip
-                continue
-            
-            scope = scope_parts[0]  # EXACT / RELATED / BROAD / NARROW
-            
-            if scope == "EXACT":
-                exact_syns.append(text)
-    
-    return exact_syns
+from pathlib import Path
+from textmining.ontology import OntologyGraph
+from textmining.synonym_utils import write_syn_file
 
 parser = argparse.ArgumentParser(
-    description="""Parses an file containing obo links and generate a synonym file with the following format:
+    description=
+"""Parses a .obo file and generate a synonym file with the following format:
 <id>:<syn1>|<syn2>|<syn3>|...
-where the assigned ids are retrieved from the ontology.
+where the assigned ids are retrieved from the ontology. Root ids can be specified with the optional --roots paramter.
 """
 )
 
 parser.add_argument(
-    "-obo", metavar="obo", required=True, help="Path to file containing obo links"
+    "-obo", 
+    metavar="obo", 
+    required=True, 
+    help="Path to obo file or url"
 )
 
 parser.add_argument(
-    "-out", metavar="out", required=True, help="Path to output dir."
+    "-out", 
+    metavar="out",
+    required=True, 
+    help="Path to output file."
 )
 
-args = parser.parse_args()
+parser.add_argument(
+    '--roots',
+    metavar='roots',
+    nargs='+',        
+    default=None,
+    help='List of root IDs'
+)
 
-obo_links = get_links(args.obo)
-opener = urllib.request.build_opener()
-opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]
-urllib.request.install_opener(opener)
-out = args.out
+parser.add_argument(
+    '--relationship',
+    type=str,
+    default='is_a',
+    help='Type of relationship (default: is_a)'
+)
 
-for link in obo_links:
-    print(f"Fetching {link}")
-    graph = obonet.read_obo(link)
-    ontology_name = graph.graph.get('ontology', 'Unkown')
+parser.add_argument(
+    '--exclude-gci',
+    action='store_true',
+    default=False,
+    help='Exclude GCI lines (default: False)'
+)
 
+parser.add_argument(
+    '--no-ignore-obsolete',
+    action='store_true',
+    default=False,
+    help='Do not ignore obsolete items (default: False)'
+)
 
-    with open(os.path.join(out, ontology_name), "w") as f:
-        for node_id, data in graph.nodes(data=True):
-            # Skip obsolete terms
-            if not data or data.get("is_obsolete") == "true":
-                continue
-
-            name = data.get("name")
-
-            # Skip entries without a name or id instead of crashing
-            if not name or not node_id:
-                print(f"Warning: skipping entry without name or id — id={node_id}, name={name}")
-                continue
-
-            syns = []
-
-            # Add main name
-            syns.append(name)
-
-            # Add exact synonyms
-            exact_syns = get_exact_synonyms(data)
-            if exact_syns:
-                syns.extend(exact_syns)
-
-            # Remove potential duplicates
-            syns = list(set(syns))
-
-            if syns:
-                id_parts = node_id.split(':')
-                final_id = '_'.join(id_parts)
-                f.write(f"{final_id}:{'|'.join(syns)}\n")
+if __name__ == '__main__':
+    args = parser.parse_args()
+    obo = args.obo
+    out_path = Path(args.out)
+    roots = args.roots
+    rel = args.relationship
+    exclude_gci = args.exclude_gci
+    ignore_obsolete = not args.no_ignore_obsolete
+    
+    graph = None
+    if obo.startswith(("http://", "https://", "ftp://")): 
+        graph = OntologyGraph.from_url(url=obo,
+                                       relationship=rel,
+                                       exclude_gci=exclude_gci,
+                                       ignore_obsolete=ignore_obsolete)
+    else:
+        graph = OntologyGraph.from_obo(obo_path=obo,
+                            relatioship=rel,
+                            exclude_gci=exclude_gci,
+                            ignore_obsolete=ignore_obsolete)
+    write_syn_file(
+        output=out_path,
+        synonym_groups=graph.extract_synonyms(roots)
+    )
