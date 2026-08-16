@@ -40,3 +40,7 @@ temp/
 
 # Python build artifacts
 *.egg-info/
+
+
+# instructions
+thesis_instructions.txt

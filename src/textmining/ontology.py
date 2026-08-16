@@ -354,9 +354,10 @@ class OntologyGraph:
                          root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str]]]:
         indices = self._rel_subgraph.node_indices()
         if root_ids:
-            indices = set.union({
-                rx.descendants(self._id_to_idx[root_id] for root_id in root_ids)
-                })
+            indices = set()
+            for root_id in root_ids:
+                root_idx = self._id_to_idx[root_id]
+                indices.update(rx.descendants(self._rel_subgraph, root_idx) | {root_idx})
 
         for idx in indices:
             data = self._rel_subgraph[idx]
