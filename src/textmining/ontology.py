@@ -8,8 +8,9 @@ from pathlib import Path
 import logging
 import time
 import rustworkx as rx
-from typing import Iterator
+from typing import Iterator, Iterable
 import io
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,25 @@ def to_internal_id(term_id: str) -> str:
     prefix, local_id = term_id.split("_", 1)
     return f"{prefix}:{local_id}"
 
-def read_obo_without_gci_is_a(obo_path: str | Path, ignore_obsolete: bool = True):
-    obo_path = Path(obo_path)
+def get_exact_synonyms(node_data: dict):
+    exact_syns = []
+    for s in node_data.get("synonym", []):
+        parts = s.split('"')
+        
+        if len(parts) > 2:
+            text = parts[1]
+            scope_parts = parts[2].strip().split()
+            if not scope_parts:  # no scope word present, skip
+                continue
+            scope = scope_parts[0]  # EXACT / RELATED / BROAD / NARROW
+            if scope == "EXACT":
+                exact_syns.append(text)
+    return exact_syns
+
+def _process_obo_lines(lines: Iterable[str], ignore_obsolete: bool, exclude_gci: bool):
     cleaned_lines = []
-    
-    with obo_path.open("r", encoding="utf-8") as f:
-        for line in f:
+    for line in lines:
+        if exclude_gci:
             stripped = line.lstrip()
             is_gci_is_a = (
                 stripped.startswith("is_a:")
@@ -40,11 +54,31 @@ def read_obo_without_gci_is_a(obo_path: str | Path, ignore_obsolete: bool = True
             )
             if is_gci_is_a:
                 continue
-            cleaned_lines.append(line)
+        cleaned_lines.append(line)
             
-    # Stream in-memory directly to obonet (never touches disk or /tmp)
     obo_stream = io.StringIO("".join(cleaned_lines))
     return obonet.read_obo(obo_stream, ignore_obsolete=ignore_obsolete)
+
+
+def read_obo(
+    source: str | Path,
+    ignore_obsolete: bool = True,
+    exclude_gci: bool = False,
+    from_url: bool = False
+):
+    source = str(source)
+    if from_url:
+        req = urllib.request.Request(
+            source, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        )
+        with urllib.request.urlopen(req) as response:
+            with io.TextIOWrapper(response, encoding="utf-8") as text_stream:
+                return _process_obo_lines(text_stream, ignore_obsolete, exclude_gci)
+    else:
+        with Path(source).open("r", encoding="utf-8") as f:
+            return _process_obo_lines(f, ignore_obsolete, exclude_gci)
+        
 
 class OntologyGraph:
     
@@ -92,22 +126,14 @@ class OntologyGraph:
                  exclude_gci: bool = False,
                  ignore_obsolete: bool = True):
         
-        nx_graph = read_obo_without_gci_is_a(obo_path=obo_path, ignore_obolete=ignore_obsolete) if exclude_gci else obonet.read_obo(obo_path, ignore_obsolete=ignore_obsolete)
+        nx_graph = read_obo(source=obo_path,
+                            ignore_obsolete=ignore_obsolete,
+                            exclude_gci=exclude_gci,
+                            from_url=False)
+        return cls.from_nx_graph(nx_graph=nx_graph,
+                                 relationship=relatioship,
+                                 name=obo_path)
         
-        for node_id, data in nx_graph.nodes(data=True):
-            data['id'] = node_id
-        for _, _, key, data in nx_graph.edges(keys=True, data=True):
-            data['key'] = key
-        
-        rx_graph = rx.networkx_converter(nx_graph, keep_attributes=True)
-        rx_graph.attrs = {
-            'name':
-                getattr(nx_graph, 'name', obo_path)
-        }
-
-        return cls(rx_graph, relatioship)
-        
-
     @classmethod
     def from_merge(cls, obo_paths, equivalence_fn, relationship='is_a'):
         raise NotImplementedError('Merging not implemented yet.')
@@ -164,6 +190,40 @@ class OntologyGraph:
             g.add_edge(term_id_to_idx[u], term_id_to_idx[v], edge_payload)
         return cls(g, relationship)
     
+    @classmethod
+    def from_url(cls, 
+                 url : str,
+                 relationship: str = 'is_a',
+                 exclude_gci: bool = False,
+                 ignore_obsolete: bool = True):
+        nx_graph = read_obo(
+            source=url,
+            ignore_obsolete=ignore_obsolete,
+            exclude_gci=exclude_gci,
+            from_url=True
+        )
+        return cls.from_nx_graph(
+            nx_graph=nx_graph,
+            relationship=relationship,
+            name=url
+        )
+    
+    @classmethod
+    def from_nx_graph(cls, 
+                      nx_graph: nx.MultiDiGraph,
+                      relationship: str = 'is_a',
+                      name: str = 'unknown'):
+        for node_id, data in nx_graph.nodes(data=True):
+            data['id'] = node_id
+        for _, _, key, data in nx_graph.edges(keys=True, data=True):
+            data['key'] = key
+        rx_graph = rx.networkx_converter(nx_graph, keep_attributes=True)
+        rx_graph.attrs = {
+            'name':
+                getattr(nx_graph, 'name', name)
+        }
+        return cls(rx_graph, relationship)
+        
     @staticmethod
     def _build_alt_id_map(graph: rx.PyDiGraph):        
         alt_id_to_idx = {}
@@ -262,7 +322,7 @@ class OntologyGraph:
             out.append(idx)
         return out
     
-    # Need to be internal id
+    # Needs to be internal id
     def map_to_index(self, term_id):
         idx = self._id_to_idx.get(term_id, None)
         if idx is None:
@@ -288,3 +348,28 @@ class OntologyGraph:
             data = self._rel_subgraph.get_node_data(alt_idx)
             external_id = to_external_id(data['id'])
         return external_id
+    
+    # Root ids in internal format
+    def extract_synonyms(self,
+                         root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str]]]:
+        indices = self._rel_subgraph.node_indices()
+        if root_ids:
+            indices = set.union({
+                rx.descendants(self._id_to_idx[root_id] for root_id in root_ids)
+                })
+
+        for idx in indices:
+            data = self._rel_subgraph[idx]
+            name = data.get("name") if data else None
+            term_id = data.get("id") if data else None
+            if not (data and name and term_id):
+                continue
+            syns = [name]
+            exact_syns = get_exact_synonyms(data)
+            if exact_syns:
+                syns.extend(exact_syns)
+            syns = list(set(syns))
+            term_id_external = to_external_id(term_id)
+            yield (term_id_external, syns)
+            
+    
