@@ -1,6 +1,8 @@
 import mmap
 import os
 from collections import defaultdict, Counter
+from typing import Iterator
+from pathlib import Path
 
 def read_synfile(file) -> defaultdict:
     line_count = 0
@@ -59,6 +61,18 @@ def compare_synfiles(file_1, file_2, print_overlapping=False):
         print(f'Overlapping ids: {out_id}')
         print(f'Overlapping terms: {out_term}')
 
+def write_syn_file(output: str | Path, 
+                   synonym_groups: Iterator[tuple[str, list[str]]]):
+    with open(output, 'w') as out:
+        for group in synonym_groups:
+            line = create_syn_line(group)
+            out.write(line)
+            out.write('\n')
+        
+
+def create_syn_line(id_to_syns: tuple[str, list[str]]):
+    term_id, syns = id_to_syns
+    return f"{term_id}:{'|'.join(syns)}"
 
 class SynFileReader:
     """Provides efficient access to specific lines of a synonym file"""
