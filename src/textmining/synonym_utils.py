@@ -208,13 +208,3 @@ def merge_synonyms(input_file, output_file):
             # Join synonyms back with '|'
             synonyms_string = "|".join(sorted(synonyms_set))
             f.write(f"{id_part}:{synonyms_string}\n")
-
-
-basepath_in = '/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/taxonomy_bk/'
-basepath_out = '/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/taxonomy_no_dups/'
-file_names = ['linnaeus_cell_lines.syn', 'linnaeus_proxy.syn', 'linnaeus_species.syn']
-synfile_paths_in = (basepath_in + file_name for file_name in file_names)
-synfile_paths_out = (basepath_out + file_name for file_name in file_names)
-
-for in_f, out_f in zip(synfile_paths_in, synfile_paths_out):
-    merge_synonyms(in_f, out_f)

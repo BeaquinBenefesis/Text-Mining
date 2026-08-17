@@ -160,14 +160,19 @@ class HitProcessor:
                 # From abbreviation candidates (inferred and non-inferred ones), keep only the inferred abbreviations
                 filtered_hits = [h for h in g.hits if h.synonym_type != SynonymType.ABBREVIATION]
             elif g.contains_abbreviation():
-                filtered_hits = [h for h in g.hits if (h.synonym_type != SynonymType.ABBREVIATION) or (h.entity_id in article_evidence.unambiguous_entity_ids)]
+                filtered_hits = [h for h in g.hits 
+                                 if (h.synonym_type != SynonymType.ABBREVIATION) 
+                                 or (h.entity_id in article_evidence.unambiguous_entity_ids)]
             else:
                 filtered_hits = g.hits
+            
             if not filtered_hits:
                 g.group_status = GroupStatus.FAILURE
                 logger.debug("Group resolution FAILED: no candidates left after filtering")
                 continue
+            
             implied_ids = {h.entity_id for h in filtered_hits}
+           
             if len(implied_ids) == 1:
                 resolved_id = next(iter(implied_ids))
                 hit = next(h for h in filtered_hits if h.entity_id == resolved_id)
@@ -381,7 +386,14 @@ class HitProcessorHistory:
 
     ambiguous_synonym_counts: Counter = field(default_factory=Counter)   # synonym -> times it produced an ambiguous group
     resolved_synonym_counts: Counter = field(default_factory=Counter)    # synonym -> times it resolved successfully
-    unresolved_synonym_counts: Counter = field(default_factory=Counter)  # synonym -> times it stayed ambiguous/failed
+    # synonym -> times it stayed unresolved, broken out per GroupStatus (AMBIGUOUS_ENTITY_TYPE / AMBIGUOUS_ID / FAILURE)
+    unresolved_synonym_counts_by_status: dict = field(
+        default_factory=lambda: {
+            GroupStatus.AMBIGUOUS_ENTITY_TYPE: Counter(),
+            GroupStatus.AMBIGUOUS_ID: Counter(),
+            GroupStatus.FAILURE: Counter(),
+        }
+    )
 
 
     def record_input_hit(self, hit: CandidateHit) -> None:
@@ -410,8 +422,8 @@ class HitProcessorHistory:
 
         if group.group_status in (GroupStatus.EXACT_MATCH, GroupStatus.RESOLVED):
             self.resolved_synonym_counts[synonym_key] += 1
-        elif group.group_status in (GroupStatus.AMBIGUOUS_ENTITY_TYPE, GroupStatus.FAILURE, GroupStatus.AMBIGUOUS_ID):
-            self.unresolved_synonym_counts[synonym_key] += 1
+        elif group.group_status in self.unresolved_synonym_counts_by_status:
+            self.unresolved_synonym_counts_by_status[group.group_status][synonym_key] += 1
 
     def record_output_hit(self, hit: CandidateHit) -> None:
         self.output_hits += 1
@@ -455,44 +467,72 @@ class HitProcessorHistory:
     def top_resolved_synonyms(self, n: int = 10):
         return self.resolved_synonym_counts.most_common(n)
 
-    def top_unresolved_synonyms(self, n: int = 10):
-        return self.unresolved_synonym_counts.most_common(n)
+    def top_unresolved_synonyms(self, n: int = 10, status: Optional[GroupStatus] = None):
+        """Top unresolved synonyms. Pass a specific GroupStatus (e.g.
+        GroupStatus.AMBIGUOUS_ENTITY_TYPE) to isolate one failure mode, or
+        omit to combine all unresolved statuses."""
+        if status is not None:
+            return self.unresolved_synonym_counts_by_status[status].most_common(n)
+        combined = Counter()
+        for counts in self.unresolved_synonym_counts_by_status.values():
+            combined.update(counts)
+        return combined.most_common(n)
 
     def print_summary(self, top_n: int = 10) -> None:
-        print(f"{'--- HitProcessor Summary ---':^40}")
-        print(f"Articles Processed:      {self.articles_processed}")
-        print(f"Input Hits:              {self.input_hits}")
-        print(f"Output Hits:             {self.output_hits}")
-        print(f"Hits Collapsed:          {self.hits_collapsed}")
-        print(f"Total Groups:            {self.total_groups}")
-        print(f"Multi-Candidate Groups:  {self.multi_candidate_groups}")
-        print(f"Resolution Rate:         {self.resolution_rate:.2%}")
-        print(f"Multi-Candidate Res. Rate: {self.multi_candidate_resolution_rate:.2%}")
+        def emit(line: str = "") -> None:
+            #print(line)
+            logger.info(line)
 
-        print("\nGroup Size Distribution:")
+        emit(f"{'--- HitProcessor Summary ---':^40}")
+        emit(f"Articles Processed:      {self.articles_processed}")
+        emit(f"Input Hits:              {self.input_hits}")
+        emit(f"Output Hits:             {self.output_hits}")
+        emit(f"Hits Collapsed:          {self.hits_collapsed}")
+        emit(f"Total Groups:            {self.total_groups}")
+        emit(f"Multi-Candidate Groups:  {self.multi_candidate_groups}")
+        emit(f"Resolution Rate:         {self.resolution_rate:.2%}")
+        emit(f"Multi-Candidate Res. Rate: {self.multi_candidate_resolution_rate:.2%}")
+
+        emit()
+        emit("Group Size Distribution:")
         for size, count in sorted(self.group_size_counts.items()):
-            print(f"  size={size:<3}: {count}")
+            emit(f"  size={size:<3}: {count}")
 
-        print("\nInput Hits by Entity Type:")
+        emit()
+        emit("Input Hits by Entity Type:")
         for entity, count in self.input_entity_type_counts.items():
-            print(f"  {entity:<20}: {count}")
+            emit(f"  {entity:<20}: {count}")
 
-        print("\nInput Hits by Synonym Type:")
+        emit()
+        emit("Input Hits by Synonym Type:")
         for syn_type, count in self.input_synonym_type_counts.items():
-            print(f"  {syn_type:<20}: {count}")
+            emit(f"  {syn_type:<20}: {count}")
 
-        print("\nGroups by Resolution Status:")
+        emit()
+        emit("Groups by Resolution Status:")
         for status, count in self.group_status_counts.items():
-            print(f"  {status:<20}: {count}")
+            emit(f"  {status:<20}: {count}")
 
-        print(f"\nTop {top_n} Synonyms Flagged Ambiguous:")
+        emit()
+        emit(f"Top {top_n} Synonyms Flagged Ambiguous:")
         for synonym, count in self.top_ambiguous_synonyms(top_n):
-            print(f"  {synonym!r:<30}: {count}")
+            emit(f"  {synonym!r:<30}: {count}")
 
-        print(f"\nTop {top_n} Synonyms Successfully Resolved:")
+        emit()
+        emit(f"Top {top_n} Synonyms Successfully Resolved:")
         for synonym, count in self.top_resolved_synonyms(top_n):
-            print(f"  {synonym!r:<30}: {count}")
+            emit(f"  {synonym!r:<30}: {count}")
 
-        print(f"\nTop {top_n} Synonyms Remaining Unresolved:")
+        emit()
+        emit(f"Top {top_n} Synonyms Remaining Unresolved (all statuses):")
         for synonym, count in self.top_unresolved_synonyms(top_n):
-            print(f"  {synonym!r:<30}: {count}")
+            emit(f"  {synonym!r:<30}: {count}")
+
+        for status in self.unresolved_synonym_counts_by_status:
+            top = self.top_unresolved_synonyms(top_n, status=status)
+            if not top:
+                continue
+            emit()
+            emit(f"Top {top_n} Synonyms Unresolved due to {status.value}:")
+            for synonym, count in top:
+                emit(f"  {synonym!r:<30}: {count}")

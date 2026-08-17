@@ -19,7 +19,7 @@ class CandidateHit:
     prefix: Optional[str] = None
     suffix: Optional[str] = None
     synonym_id: Optional[str] = None
-    mention_type: Optional[str] = None# This is used for gold standard hits from NCBI
+    mention_type: Optional[str] = None  # This is used for gold standard hits from NCBI
     article_id: str = field(init=False)
     section_num: str = field(init=False)
     sentence_num: str = field(init=False)

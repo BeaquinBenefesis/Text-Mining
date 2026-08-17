@@ -299,7 +299,8 @@ class OntologyGraph:
         if len(lca_indices) == 1:
             return self.map_idx_to_external_id(lca_indices[0]) 
         
-        return max(map(self.map_idx_to_external_id, lca_indices), key=lambda idx: (self._compute_ic_from_index(idx), idx))
+        max_lca_idx = max(lca_indices, key=lambda idx: (self._compute_ic_from_index(idx), idx))
+        return self.map_idx_to_external_id(max_lca_idx)
         
         
     def compute_ic(self, term_id):

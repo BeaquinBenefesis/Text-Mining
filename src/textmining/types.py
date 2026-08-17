@@ -15,6 +15,7 @@ class HitType(str, Enum):
     TISSUE = 'TISSUE'
     CELL = 'CELL'
     PATHWAY = 'PATHWAY'
+    BIOLOGICAL_PROCESS = 'BIOLOGICAL_PROCESS'
 
 class SynonymType(str, Enum):
     STANDARD = 'STANDARD'

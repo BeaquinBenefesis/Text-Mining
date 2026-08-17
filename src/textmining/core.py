@@ -24,7 +24,7 @@ class Processor:
         logger.info("Core processor initialized")
    
     def _normalize_article(self, article: ArticleRecord, normalization_context: NormalizationContext) -> list[NormalizedHit]:
-        normalized_hits: NormalizedHit = []
+        normalized_hits: list[NormalizedHit] = []
         for candidate_hit in article.resolved_hits:
             self.core_history.record_input_hit(candidate_hit)
             normalizer = self.normalizers[candidate_hit.entity_type]
@@ -48,6 +48,8 @@ class Processor:
             article.normalized_hits = self._normalize_article(article, context)
             self.core_history.record_article()
             yield article
+        if print_summary:
+            self.core_history.print_summary()
             
     
     @staticmethod
@@ -63,18 +65,19 @@ class ProcessorHistory:
     input_hits: int = 0
     output_hits: int = 0
     dead_hits: int = 0
-    entity_types: Counter = field(default_factory=Counter)
+    input_entity_types: Counter = field(default_factory=Counter)
+    output_entity_types: Counter = field(default_factory=Counter)
     normalization_statuses: Counter = field(default_factory=Counter)
     target_types: Counter = field(default_factory=Counter)
     articles_processed: int = 0
-    
+
     def record_input_hit(self, hit: CandidateHit):
         self.input_hits += 1
-        self.entity_types[hit.entity_type] += 1
-    
+        self.input_entity_types[hit.entity_type] += 1
+
     def record_output_hit(self, hit: NormalizedHit):
         self.output_hits += 1
-        self.entity_types[hit.entity_type] += 1
+        self.output_entity_types[hit.entity_type] += 1
         if hit.normalization:
             self.normalization_statuses[hit.normalization.status] += 1
             if hit.normalization.target_type is not None:
@@ -86,20 +89,31 @@ class ProcessorHistory:
         self.articles_processed += 1
         
     def print_summary(self):
-        print(f"{'--- Processor Summary ---':^40}")
-        print(f"Articles Processed: {self.articles_processed}")
-        print(f"Input Hits:         {self.input_hits}")
-        print(f"Output Hits:        {self.output_hits}")
-        print(f"Dead Hits:          {self.dead_hits}")
+        def emit(line: str = "") -> None:
+            #print(line)
+            logger.info(line)
+
+        emit(f"{'--- Processor Summary ---':^40}")
+        emit(f"Articles Processed: {self.articles_processed}")
+        emit(f"Input Hits:         {self.input_hits}")
+        emit(f"Output Hits:        {self.output_hits}")
+        emit(f"Dead Hits:          {self.dead_hits}")
         if self.input_hits:
             expansion_ratio = self.output_hits / self.input_hits
-            print(f"Output/Input Ratio: {expansion_ratio:.2f}")
-        print("\nBreakdown by Entity Type:")
-        for entity, count in self.entity_types.items():
-            print(f"  {entity:<20}: {count}")
-        print("\nBreakdown by Normalization Status:")
+            emit(f"Output/Input Ratio: {expansion_ratio:.2f}")
+        emit()
+        emit("Input Hits by Entity Type:")
+        for entity, count in self.input_entity_types.items():
+            emit(f"  {entity:<20}: {count}")
+        emit()
+        emit("Output Hits by Entity Type:")
+        for entity, count in self.output_entity_types.items():
+            emit(f"  {entity:<20}: {count}")
+        emit()
+        emit("Breakdown by Normalization Status:")
         for status, count in self.normalization_statuses.items():
-            print(f"  {status:<20}: {count}")
-        print("\nBreakdown by Target Type:")
+            emit(f"  {status:<20}: {count}")
+        emit()
+        emit("Breakdown by Target Type:")
         for target, count in self.target_types.items():
-            print(f"  {target:<20}: {count}")
+            emit(f"  {target:<20}: {count}")
