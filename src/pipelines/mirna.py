@@ -74,6 +74,7 @@ def run_mirna_pipeline(output_name: str, sentence_path = None):
     config = MirnaPipelineConfig(output_name)
     if sentence_path:
         config.sentence_pattern = sentence_path
+        config.sentence_path = sentence_path
     setup_logging(output_dir=config.output_dir,
                   run_name=output_name)
     res = run_syngrep(
@@ -82,7 +83,8 @@ def run_mirna_pipeline(output_name: str, sentence_path = None):
         output_dir=config.output_dir,
         within_word=config.within_word,
         output_name=config.output_name,
-        abbrev=config.abbrev,
+        abbrev_mode=config.abbrev_mode,
+        no_abbrev_syn_list=config.no_abbrev_syn_list,
         ntasks=config.n_tasks,
     )
     process_mirna_hits(

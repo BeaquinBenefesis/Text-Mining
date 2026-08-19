@@ -76,9 +76,12 @@ class NormalizationResult:
 
 @dataclass(frozen=True)
 class Association:
+    article_id: str
     sentence_id: str
+    section_num: str
     entity_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
+    entity_scores: tuple[HitScore, HitScore]
 
 @dataclass(kw_only=True)
 class NormalizedHit(CandidateHit):

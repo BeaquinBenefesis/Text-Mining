@@ -49,7 +49,8 @@ def run_disease_pipeline(output_name: str):
         abbrev_synonyms=config.abbrev_synonyms,
         output_dir=config.output_dir,
         output_name=config.output_name,
-        abbrev=config.abbrev,
+        abbrev_mode=config.abbrev_mode,
+        no_abbrev_syn_list=config.no_abbrev_syn_list,
         word_char=config.word_char
     )
     process_disease_hits(

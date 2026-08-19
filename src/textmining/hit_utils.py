@@ -7,6 +7,7 @@ from itertools import zip_longest
 from typing import Iterator, Optional
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from textmining.types import HitType, SynonymType, GroupStatus
 from textmining.models import HitGroup, CandidateHit
 from textmining.article_utils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
@@ -33,10 +34,6 @@ class HitProcessor:
         self.type_map = HitProcessor.parse_synfile_type_map(synfile_type_map)
         self.synfile_map = HitProcessor.parse_synfile_map(synfile_map)
         self.synonym_paths = self.synfile_map.values()
-        self.file_id_to_type = {
-            syn_id: self.type_map[os.path.basename(path)]
-            for syn_id, path in self.synfile_map.items()
-        }
         self.type_to_ontology = type_to_ontology
         self.history = HitProcessorHistory()
         logger.info(
@@ -76,7 +73,12 @@ class HitProcessor:
                 hits_path = sorted_path
                 logger.info("Sorted hits written to tmp file: %s", sorted_path)
 
-            hits_iter = (self._iter_syngrep_hits(hits_path=hits_path, remove_sent_id_prefix=remove_sent_id_prefix)
+            hits_iter = (self._iter_syngrep_hits(hits_path=hits_path,
+                                                 remove_sent_id_prefix=remove_sent_id_prefix,
+                                                 synfile_map=self.synfile_map,
+                                                 synfile_type_map=self.type_map,
+                                                 type_to_ontology=self.type_to_ontology,
+                                                 low_memory=self.low_memory)
                         if source == ArticleSource.SYSTEM else self._iter_gold_hits(hits_path))
             articles_iter = self._iter_articles(hits_iter, source)
             
@@ -110,7 +112,7 @@ class HitProcessor:
             current_article = hit.article_id
             if prev_article and current_article != prev_article:
                 yield self.create_article(hit_buffer, source)
-                hit_buffer.clear()
+                hit_buffer = []
             hit_buffer.append(hit)
             prev_article = current_article
             prev_hit = hit
@@ -241,9 +243,15 @@ class HitProcessor:
         if current_group.hits:
             groups.append(current_group)
         return groups                                 
-      
-    def _iter_syngrep_hits(self, hits_path, remove_sent_id_prefix=True) -> Iterator[CandidateHit]:
-        with MultiSynFileReader(self.low_memory) as reader, open(hits_path, 'r') as f:
+    
+    @staticmethod
+    def _iter_syngrep_hits(hits_path: str | Path,
+                           synfile_map: dict[str, str],
+                           synfile_type_map: dict[str, tuple[HitType, bool]],
+                           type_to_ontology: dict[HitType, OntologyGraph],
+                           remove_sent_id_prefix=True,
+                           low_memory=False) -> Iterator[CandidateHit]:
+        with MultiSynFileReader(low_memory) as reader, open(hits_path, 'r') as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -260,12 +268,12 @@ class HitProcessor:
                 line_number = int(line_number)
                 is_inferred_abbrev = len(synonym_parts) == 3
 
-                if file_id not in self.synfile_map:
+                if file_id not in synfile_map:
                     logger.warning("No synonym file mapped for key: %s", file_id)
                     raise KeyError(f"No synonym file mapped for key: {file_id!r}")
 
-                hit_type, is_abbrev = self.file_id_to_type[file_id]
-
+                file_path = synfile_map[file_id]
+                hit_type, is_abbrev = synfile_type_map[file_path.name]
         
                 if is_inferred_abbrev and is_abbrev:
                     logger.warning("Found hit that is an abbreviation and an inferred abbreviation!")
@@ -284,13 +292,13 @@ class HitProcessor:
                 if remove_sent_id_prefix and ':' in sentence_id:
                     sentence_id = sentence_id.split(':', 1)[1]
 
-                file_path = self.synfile_map[file_id]
-                raw_entity_id = reader.extract_id(file_path, line_number)
+                
+                raw_entity_id = reader.extract_id(str(file_path), line_number)
 
                 if hit_type == HitType.MIR:
                     entity_id = raw_entity_id
                 else:
-                    entity_id = self.type_to_ontology[hit_type].resolve_id(raw_entity_id)
+                    entity_id = type_to_ontology[hit_type].resolve_id(raw_entity_id)
                     if not entity_id:
                         logger.error('Could not resolve id: %s', raw_entity_id)
                         continue
@@ -329,19 +337,22 @@ class HitProcessor:
                 )
     
     @staticmethod        
-    def parse_synfile_map(path) -> dict:
-        map = {}
+    def parse_synfile_map(path: str | Path) -> dict[str, Path]:
+        synfile_map = {}
         if not path:
-            return map
+            return synfile_map
         with open(path, 'r') as f:
             for line in f:
                 line = line.strip()
                 synfile_path, synfile_id = line.split('\t')
-                map[synfile_id] = synfile_path
-        return map
+                synfile_path = Path(synfile_path)
+                if not synfile_path.exists():
+                    raise FileNotFoundError(f"Synonym file: {synfile_path} does not exist.")
+                synfile_map[synfile_id] = synfile_path
+        return synfile_map
     
     @staticmethod
-    def parse_synfile_type_map(path):
+    def parse_synfile_type_map(path: str | Path) -> dict[str, tuple[HitType, bool]]:
         result_map = {}
         if not path:
             return map

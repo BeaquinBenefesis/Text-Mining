@@ -42,6 +42,10 @@ MIR_MATURE_NORM_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaText
 MIR_PRECURSOR_AMBI_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/precursor_id_conflicts.tsv")
 MIR_MATURE_AMBI_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/mature_id_conflicts.tsv")
 
+
+## VALIDATION
+HMDD_SENTS = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/HMDD/associations.sent")
+
 def validate_resource(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"{path} not found!")

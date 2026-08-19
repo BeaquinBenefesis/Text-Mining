@@ -103,11 +103,7 @@ class OntologyGraph:
         self.roots = self.find_roots()
         logger.debug("Found %d root(s) for %s", len(self.roots), graph_name)
         
-        self._id_to_idx = {
-            data["id"]: idx 
-            for idx, data in enumerate(self.graph.nodes())
-            if "id" in data
-        }
+        self._id_to_idx = zip(self.graph.node_indices(), self.graph.nodes())
         self._alt_id_to_idx = OntologyGraph._build_alt_id_map(self._rel_subgraph)
         logger.debug("Built alt-id map for %s (%d entries)", graph_name, len(self._alt_id_to_idx))
                 
@@ -180,10 +176,10 @@ class OntologyGraph:
                 )
             
             if u not in term_id_to_idx:
-                graph_idx = g.add_node(u)
+                graph_idx = g.add_node({"id": u})
                 term_id_to_idx[u] = graph_idx
             if v not in term_id_to_idx:
-                graph_idx = g.add_node(v)
+                graph_idx = g.add_node({"id": v})
                 term_id_to_idx[v] = graph_idx
             
             edge_payload = {"key": k, **data}
@@ -342,7 +338,7 @@ class OntologyGraph:
         internal_id = to_internal_id(term_id)
         idx = self._id_to_idx.get(internal_id, None)
         if idx is not None:
-            return term_id
+            return to_external_id(term_id)
         alt_idx = self._alt_id_to_idx.get(internal_id, None)
         external_id = None
         if alt_idx is not None:

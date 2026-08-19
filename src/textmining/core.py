@@ -30,11 +30,11 @@ class Processor:
             normalizer = self.normalizers[candidate_hit.entity_type]
             normalized_hits.extend(normalizer.normalize(candidate_hit, normalization_context))
         for normalized_hit in normalized_hits:
+            self.core_history.record_output_hit(normalized_hit)
             norm_status = normalized_hit.normalization.status
             if not normalized_hit.normalization.dead and (norm_status == NormalizationStatus.NORMALIZED 
                                                           or norm_status == NormalizationStatus.FALLBACK):
                 normalized_hit.score = self.scorer.compute_score(normalized_hit.entity_type, normalized_hit.normalization.normalized_id)
-                self.core_history.record_output_hit(normalized_hit)
         return normalized_hits
                  
     def get_normalized_article_stream(self,

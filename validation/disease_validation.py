@@ -375,10 +375,12 @@ type_to_disease = {HitType.DISEASE: disease_graph}
 
 res = run_syngrep(sentence_pattern=sentences,
             synonyms=synonyms,
-            #abbrev_synonyms=abbrevs,
+            abbrev_synonyms=abbrevs,
             output_dir=output_dir,
             output_name=output_name,
-            abbrev=True, word_char=worchar
+            abbrev_mode='relaxed',
+            no_abbrev_syn_list=[disease_abbrev_path],
+            word_char=worchar
             )
 # 37
 test = Test(gold_hits_path=model_hits, 

@@ -3,6 +3,7 @@ import networkx as nx
 import re
 from collections import defaultdict
 import json
+from textmining.paths import OUTPUTS_DIR
 
 MONDO_OBO_PATH = "/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/diseases/mondo_disease_ontology.obo"
 DOID_OBO_PATH = '/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/diseases/human_disease_ontology.obo'
@@ -11,9 +12,9 @@ MONDO_DISEASE_ROOT_IDS = ['MONDO:0020683', 'MONDO:7770006', 'MONDO:7770007', 'MO
 DOID_DISEASE_ROOT_IDS = ['DOID:0050117', 'DOID:7', 'DOID:14566', 'DOID:150', 'DOID:0014667', 'DOID:630', 'DOID:0080015', 'DOID:225']
 
 # Output paths
-OUTPUT_MAPPING = "disease_mapping.json"
-OUTPUT_SYNONYMS = "/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/disease.syn"
-OUTPUT_ABBREVIATIONS = "disease_abbreviations.syn"
+OUTPUT_MAPPING = str(OUTPUTS_DIR / 'disease_mapping.json')
+OUTPUT_SYNONYMS = str(OUTPUTS_DIR / 'disease.syn')
+OUTPUT_ABBREVIATIONS = str(OUTPUTS_DIR / 'disease_abbreviation.syn')
 
 MESH_EXACTMATCH_PATTERN = re.compile(r"^skos:exactMatch\s+(MESH:[^\s]+)", re.IGNORECASE)
 DOID_EXACTMATCH_PATTERN = re.compile(r"^skos:exactMatch\s+(DOID:[^\s]+)", re.IGNORECASE)

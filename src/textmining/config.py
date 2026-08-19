@@ -26,7 +26,8 @@ class DiseasePipelineConfig(ValidatedConfig):
     synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_SYNS]})
     abbrev_synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_ABBREV]})
     output_dir: Path = output_path(OUTPUTS_DIR / "disease")
-    abbrev: bool = True
+    abbrev_mode: str | None = 'relaxed'
+    no_abbrev_syn_list: list = field(default_factory=lambda: [res.DISEASE_ABBREV])
     word_char: str = "SYNONYMS"
     disease_obo_path: Path = res.MONDO_OBO
 
@@ -68,7 +69,8 @@ class MirnaPipelineConfig(ValidatedConfig):
         HitType.TAXON: [res.SPECIES_SYNS, res.SPECIES_FROM_CL_SYNS],
     })
     output_dir: Path = output_path(OUTPUTS_DIR / "mirna")
-    abbrev: bool = False
+    abbrev_mode: str = 'relaxed'
+    no_abbrev_syn_list: list = field(default_factory=lambda: [res.MIR_SYNS])
     within_word: list = field(default_factory=lambda: [res.MIR_SYNS.name])
     sentence_path: Path = res.SENTENCES_SORTED
     mirbase: MirbaseResources = field(default_factory=MirbaseResources)
@@ -107,7 +109,8 @@ class CompleteConfig(ValidatedConfig):
                                                     HitType.PATHWAY: [res.PATHWAY_SYNS],
                                                     HitType.BIOLOGICAL_PROCESS: [res.BIOLOGICAL_PROCESS_SYNS]})
     abbrev_synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_ABBREV]})
-    abbrev: bool = False
+    abbrev_mode: str | None = 'relaxed'
+    no_abbrev_syn_list: list = field(default_factory=lambda: [res.DISEASE_ABBREV, res.MIR_SYNS])
     within_word: list = field(default_factory=lambda: [res.MIR_SYNS.name])
     taxon_obo_path: Path = res.TAXON_OBO
     disease_obo_path: Path = res.MONDO_OBO

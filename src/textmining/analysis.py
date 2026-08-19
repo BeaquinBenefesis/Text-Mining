@@ -1,14 +1,15 @@
 from typing import Iterator
 from itertools import groupby, combinations
 from collections import Counter
-from textmining.models import NormalizedHit, NormalizationStatus, HitType, Association
+from textmining.models import CandidateHit, NormalizedHit, NormalizationStatus, HitType, Association
 
 class Grouper:
     
     def __init__(self):
         self.history = GrouperHistory()
     
-    def group_by_sentence(self, hits: Iterator[NormalizedHit]) -> Iterator[tuple[str, list[NormalizedHit]]]:
+    @staticmethod
+    def group_by_sentence(hits: Iterator[CandidateHit]) -> Iterator[tuple[str, list[NormalizedHit]]]:
         for sentence_id, group in groupby(hits, key=lambda h: h.sentence_id):
             yield sentence_id, list(group)
     
@@ -17,12 +18,14 @@ class Grouper:
             raise ValueError(f'Tried to group hit that was not normalized! Hit: {hit}')
         return hit.normalization.status not in (NormalizationStatus.UNRESOLVED, NormalizationStatus.FILTERED)
     
-    def overlapping_pair(self, hit_a: NormalizedHit, hit_b: NormalizedHit) -> bool:
+    @staticmethod    
+    def overlapping_pair(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
         end_a = hit_a.start_position + hit_a.hit_length
         end_b = hit_b.start_position + hit_b.hit_length
         return hit_a.start_position < end_b and hit_b.start_position < end_a
     
-    def valid_types(self, type_a: HitType, type_b: HitType) -> bool:
+    @staticmethod
+    def valid_types(type_a: HitType, type_b: HitType) -> bool:
         return (type_a != type_b) and (type_a == HitType.MIR or type_b == HitType.MIR)
     
     def extract_valid_combinations(self, sentence_hits: list[NormalizedHit]) -> Iterator[tuple[NormalizedHit, NormalizedHit]]:
@@ -35,7 +38,6 @@ class Grouper:
                 continue
             if self.overlapping_pair(hit_a, hit_b):
                 continue
-            # MIR always comes first
             yield (hit_a, hit_b) if hit_a.entity_type == HitType.MIR else (hit_b, hit_a)
             
     def extract_cooccurrences(self, hits: Iterator[NormalizedHit], print_summary=True) -> Iterator:
@@ -45,13 +47,47 @@ class Grouper:
             for (hit_a, hit_b) in self.extract_valid_combinations(sentence_hits):      
                 hit_a_id = hit_a.normalization.normalized_id
                 hit_b_id = hit_b.normalization.normalized_id
+                
                 hit_a_type = hit_a.entity_type
                 hit_b_type = hit_b.entity_type
-                association = Association(sentence_id, (hit_a_id, hit_b_id), (hit_a_type, hit_b_type))
+                
+                hit_a_score = hit_a.score
+                hit_b_score = hit_b.score
+                
+                article_id = hit_a.article_id
+                section_num = hit_a.section_num
+                
+                association = Association(article_id=article_id,
+                                          sentence_id=sentence_id, 
+                                          section_num=section_num,
+                                          entity_ids=(hit_a_id, hit_b_id),
+                                          entity_types=(hit_a_type, hit_b_type),
+                                          entity_scores=(hit_a_score, hit_b_score))
                 self.history.record(association)
                 yield association
         if print_summary:
             self.history.print_most_common()
+
+class Analyzer:
+    
+    def __init__(self):
+        self.counts: Counter = Counter()
+        
+    def __init__(self):
+            self.counts: Counter = Counter()
+            self.total = 0
+            
+    def record(self, association: Association):
+        self.total += 1
+        key = (association.entity_ids, association.entity_types)
+        self.counts[key] += 1
+            
+    def process_associations(self, associations: Iterator[Association]):
+        for assoc in associations:
+            self.record(assoc)
+            #yield assoc
+        
+        
 
 class GrouperHistory:
 

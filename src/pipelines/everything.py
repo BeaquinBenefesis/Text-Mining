@@ -96,10 +96,12 @@ def run_complete_pipeline(output_name: str, sentence_path = None):
     res = run_syngrep(
         sentence_pattern=config.sentence_pattern,
         synonyms=config.synonyms,
+        abbrev_synonyms=config.abbrev_synonyms,
         output_dir=config.output_dir,
         within_word=config.within_word,
         output_name=config.output_name,
-        abbrev=config.abbrev,
+        abbrev_mode=config.abbrev_mode,
+        no_abbrev_syn_list=config.no_abbrev_syn_list,
         ntasks=config.n_tasks,
     )
     
