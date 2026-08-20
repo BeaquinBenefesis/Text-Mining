@@ -59,14 +59,30 @@ class HitProcessor:
                 env = os.environ.copy()
                 env["LC_ALL"] = "C"
 
-                cmd = [
-                    'sort', f'--parallel={parallel}', '-S', f'{memory_cap}G',
-                    '-t\t', '-k1,1V', '-k4,4n', '-k5,5n',
-                    str(self.hits_path), '-o', str(sorted_path),
-                ]
-                logger.info("Sorting hits: %s", ' '.join(cmd))
+                # Sort on the same (article_id, section_num, sentence_num, start, length)
+                # fields that CandidateHit.sort_key uses, instead of a lexical/version
+                # sort over the raw sentence_id string, so the two orderings cannot
+                # disagree (see REVIEW.md §2.13). The awk step mirrors
+                # sentence_utils.parse_sentence_id's regex to split column 1 into three
+                # extra numeric-sortable columns, which are dropped again by cut.
+                awk_split = (
+                    r"""awk -F'\t' 'BEGIN{OFS="\t"} {"""
+                    r"""s=$1; sub(/^[^:]*:/, "", s); """
+                    r"""if (match(s, /^(.+)\.([0-9]+)\.([0-9]+)$/, a)) """
+                    r"""print $0, a[1], a[2], a[3]; """
+                    r"""else print $0, s, "0", "0" """
+                    r"""}'"""
+                )
+                cmd = (
+                    f"{awk_split} {str(self.hits_path)!r} | "
+                    f"sort --parallel={parallel} -S {memory_cap}G -t$'\\t' "
+                    f"-k9,9 -k10,10n -k11,11n -k4,4n -k5,5n | "
+                    f"cut -f1-8 > {str(sorted_path)!r}"
+                )
+                logger.info("Sorting hits: %s", cmd)
                 try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+                    subprocess.run(cmd, shell=True, check=True, capture_output=True,
+                                    text=True, env=env, executable='/bin/bash')
                 except subprocess.CalledProcessError as e:
                     logger.critical("External sort failed (rc=%d): %s", e.returncode, e.stderr)
                     raise
@@ -326,7 +342,7 @@ class HitProcessor:
                 parts = dict(zip(_GOLD_COL_NAMES, line.split('\t')))
 
                 yield CandidateHit(
-                    entity_type=parts['entity_type'],
+                    entity_type=HitType(parts['entity_type']),
                     synonym_type=SynonymType.STANDARD,
                     sentence_id=parts['sentence_id'],
                     entity_id=parts['entity_id'],
