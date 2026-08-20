@@ -1,9 +1,6 @@
 import obonet
 import networkx as nx
 import math
-from collections import defaultdict
-import re
-import tempfile
 from pathlib import Path
 import logging
 import time

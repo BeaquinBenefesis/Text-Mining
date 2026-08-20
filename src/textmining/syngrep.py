@@ -24,10 +24,10 @@ def _write_synfile_type_map(synonyms: dict[HitType, list[str]], abbrevs: dict[Hi
     with open(path, 'w') as fh:
         for hit_type, paths in synonyms.items():
             for p in paths:
-                fh.write(f'{p}\t{hit_type.name}\t{False}\n')
+                fh.write(f'{p}\t{hit_type.name}\tfalse\n')
         for hit_type, paths in abbrevs.items():
             for p in paths:
-                fh.write(f'{p}\t{hit_type.name}\t{True}\n')
+                fh.write(f'{p}\t{hit_type.name}\ttrue\n')
 
 def run_syngrep(sentence_pattern: str,
                 synonyms: dict[HitType, list[str]],

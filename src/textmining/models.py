@@ -138,7 +138,7 @@ class NormalizationContext:
         return self._buffers.get(hit_type, [])
     
     def get_taxon_relevance(self):
-        if self._taxon_cache:
+        if self._taxon_cache is not None:
             return self._taxon_cache
         tax_buffer = self._buffers[HitType.TAXON]
         relevance = {tax.entity_id : 1 for tax in tax_buffer}

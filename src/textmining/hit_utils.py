@@ -33,7 +33,6 @@ class HitProcessor:
         self.low_memory = low_memory
         self.type_map = HitProcessor.parse_synfile_type_map(synfile_type_map)
         self.synfile_map = HitProcessor.parse_synfile_map(synfile_map)
-        self.synonym_paths = self.synfile_map.values()
         self.type_to_ontology = type_to_ontology
         self.history = HitProcessorHistory()
         logger.info(
