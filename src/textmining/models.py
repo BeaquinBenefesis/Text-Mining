@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field, replace
 from typing import Optional
-from natsort import natsort_key
 from collections import defaultdict
 from textmining.scoring import HitScore
 from textmining.sentence_utils import parse_sentence_id
@@ -15,20 +14,19 @@ class CandidateHit:
     raw_text: str
     start_position: int
     hit_length: int
+    prefix: str = None
+    suffix: str = None
     synonym: Optional[str] = None
-    prefix: Optional[str] = None
-    suffix: Optional[str] = None
     synonym_id: Optional[str] = None
     mention_type: Optional[str] = None  # This is used for gold standard hits from NCBI
     article_id: str = field(init=False)
-    section_num: str = field(init=False)
-    sentence_num: str = field(init=False)
+    section_num: int = field(init=False)
+    sentence_num: int = field(init=False)
     sort_key: tuple = field(init=False, repr=False)
     
     def __post_init__(self):
             self.article_id, self.section_num, self.sentence_num = parse_sentence_id(self.sentence_id)
-            sent_sort_key = natsort_key(self.sentence_id)
-            self.sort_key = (sent_sort_key, self.start_position, self.hit_length)
+            self.sort_key = (self.article_id, self.section_num, self.sentence_num, self.start_position, self.hit_length)
             
     def copy(self, **changes):
         return replace(self, **changes)
