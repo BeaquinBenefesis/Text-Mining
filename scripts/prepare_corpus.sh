@@ -6,7 +6,7 @@ set -euo pipefail
 # --- CONFIGURATION (DEFAULTS) ---
 INPUT_FILE=""
 OUTPUT_DIR="."              # Default output directory is the current folder
-OUTPUT_FILENAME="sorted_output.txt"
+OUTPUT_FILENAME="sorted_output.sent"
 MEM_BUFFER="10G"
 NUM_CORES="5"
 NUM_CHUNKS="1"               # Default: no splitting (single chunk)
@@ -55,11 +55,26 @@ fi
 FINAL_OUTPUT="$OUTPUT_DIR/$OUTPUT_FILENAME"
 
 echo "Sorting '$INPUT_FILE' (this can take a while for large files)..." >&2
-sort -V \
-     -S "$MEM_BUFFER" \
-     --parallel="$NUM_CORES" \
-     -o "$FINAL_OUTPUT" \
-     "$INPUT_FILE"
+# Sort on the same (article_id, section_num, sentence_num) fields, with the
+# same string/numeric split, that hit_utils.py's external hit sort uses --
+# NOT `sort -V`, which orders article_id numerically (e.g. "3318" before
+# "103093") while hit sorting orders it as a plain string (e.g. "103093"
+# before "3318"). Sample corpus + hits must agree here or the single-pass
+# SentenceReader ends up asked for a sentence it already scanned past.
+# Sort keys are prepended (not appended) so they can be stripped back off
+# with sed regardless of any tabs embedded in the sentence text itself.
+awk -F'\t' 'BEGIN{OFS="\t"} {
+    s=$1
+    if (match(s, /^(.+)\.([0-9]+)\.([0-9]+)$/, a))
+        print a[1], a[2], a[3], $0
+    else
+        print s, "0", "0", $0
+}' "$INPUT_FILE" \
+    | LC_ALL=C sort -t$'\t' -k1,1 -k2,2n -k3,3n \
+          -S "$MEM_BUFFER" \
+          --parallel="$NUM_CORES" \
+    | sed 's/^[^\t]*\t[^\t]*\t[^\t]*\t//' \
+    > "$FINAL_OUTPUT"
 
 if [ "$NUM_CHUNKS" -eq 1 ]; then
     echo "Done. Sorted output: $FINAL_OUTPUT" >&2
@@ -92,7 +107,7 @@ awk -v outdir="$OUTPUT_DIR" \
         chunk_num = 1
         bytes_in_chunk = 0
         prev_article = ""
-        outfile = outdir "/" prefix chunk_num ".txt"
+        outfile = outdir "/" prefix chunk_num ".sent"
     }
 
     {
@@ -103,7 +118,7 @@ awk -v outdir="$OUTPUT_DIR" \
             close(outfile)
             chunk_num++
             bytes_in_chunk = 0
-            outfile = outdir "/" prefix chunk_num ".txt"
+            outfile = outdir "/" prefix chunk_num ".sent"
         }
 
         print $0 >> outfile
