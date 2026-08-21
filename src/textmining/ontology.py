@@ -1,6 +1,7 @@
 import obonet
 import networkx as nx
 import math
+import pickle
 from pathlib import Path
 import logging
 import time
@@ -100,7 +101,7 @@ class OntologyGraph:
         self.roots = self.find_roots()
         logger.debug("Found %d root(s) for %s", len(self.roots), graph_name)
         
-        self._id_to_idx = zip(self.graph.node_indices(), self.graph.nodes())
+        self._id_to_idx = {data["id"]: idx for idx, data in zip(self.graph.node_indices(), self.graph.nodes())}
         self._alt_id_to_idx = OntologyGraph._build_alt_id_map(self._rel_subgraph)
         logger.debug("Built alt-id map for %s (%d entries)", graph_name, len(self._alt_id_to_idx))
                 
@@ -111,9 +112,33 @@ class OntologyGraph:
         
         logger.info("Initialized ontology graph %s: %d nodes, %d roots, %.2fs",
             graph_name, self.node_num, len(self.roots), time.monotonic() - t0)
-        
+
+    def save(self, path: str | Path):
+        """Pickle this OntologyGraph (including caches) to `path`."""
+        t0 = time.monotonic()
+        with Path(path).open('wb') as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        logger.info("Saved ontology graph %s to %s (%.2fs)",
+            self.graph.attrs.get('name', ''), path, time.monotonic() - t0)
+
     @classmethod
-    def from_obo(cls, 
+    def load(cls, path: str | Path) -> 'OntologyGraph':
+        """Load an OntologyGraph previously written by `save`. No validation
+        that `path` matches any particular source .obo — the caller is
+        responsible for invalidating a stale cache (see §6.2's data-version
+        point: a cached graph should be re-saved whenever the source ontology
+        release changes)."""
+        t0 = time.monotonic()
+        with Path(path).open('rb') as f:
+            obj = pickle.load(f)
+        if not isinstance(obj, cls):
+            raise TypeError(f"{path} does not contain an OntologyGraph")
+        logger.info("Loaded ontology graph %s from %s (%.2fs)",
+            obj.graph.attrs.get('name', ''), path, time.monotonic() - t0)
+        return obj
+
+    @classmethod
+    def from_obo(cls,
                  obo_path: str | Path, 
                  relatioship: str = 'is_a',
                  exclude_gci: bool = False,
