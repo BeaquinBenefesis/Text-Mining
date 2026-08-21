@@ -3,7 +3,6 @@ import os
 import tempfile
 import glob
 import logging
-from itertools import zip_longest
 from typing import Iterator, Optional
 from collections import Counter
 from dataclasses import dataclass, field
@@ -15,8 +14,8 @@ from textmining.ontology import OntologyGraph
 from textmining.synonym_utils import MultiSynFileReader
 
 
-_SYNGREP_COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position", "hit_length","synonym","prefix","suffix"]
-_GOLD_COL_NAMES = ["sentence_id", "entity_id", "matched_text", "start_position", "hit_length", "entity_type", "mention_type"]
+#_SYNGREP_COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position", "hit_length","synonym","prefix","suffix"]
+#_GOLD_COL_NAMES = ["sentence_id", "entity_id", "matched_text", "start_position", "hit_length", "entity_type", "mention_type"]
 
 logger = logging.getLogger(__name__)
 
@@ -271,10 +270,11 @@ class HitProcessor:
                 line = line.strip()
                 if not line:
                     continue
+                
+                parts = line.split('\t')
+                parts += [''] * (8 - len(parts))
+                sentence_id, synonym_id, matched_text, start, length, synonym, prefix, suffix = parts
 
-                parts = dict(zip_longest(_SYNGREP_COL_NAMES, line.split('\t'), fillvalue=''))
-
-                synonym_id = parts['synonym_id']
                 synonym_parts = synonym_id.split(':', 2)
                 if len(synonym_parts) < 2:
                     logger.error("Dubious synonym format: %s", line)
@@ -303,11 +303,9 @@ class HitProcessor:
                 else:
                     synonym_type = SynonymType.STANDARD
 
-                sentence_id = parts['sentence_id']
                 if remove_sent_id_prefix and ':' in sentence_id:
                     sentence_id = sentence_id.split(':', 1)[1]
 
-                
                 raw_entity_id = reader.extract_id(str(file_path), line_number)
 
                 if hit_type == HitType.MIR:
@@ -324,12 +322,12 @@ class HitProcessor:
                     sentence_id=sentence_id,
                     synonym_id=synonym_id,
                     entity_id=entity_id,
-                    raw_text=parts['matched_text'],
-                    start_position=int(parts['start_position']),
-                    hit_length=int(parts['hit_length']),
-                    synonym=parts['synonym'],
-                    prefix=parts['prefix'],
-                    suffix=parts['suffix'],
+                    raw_text=matched_text,
+                    start_position=int(start),
+                    hit_length=int(length),
+                    synonym=synonym,
+                    prefix=prefix,
+                    suffix=suffix,
                 )
 
     def _iter_gold_hits(self, hits_path):
@@ -338,17 +336,19 @@ class HitProcessor:
                 line = line.strip()
                 if not line:
                     continue
-                parts = dict(zip(_GOLD_COL_NAMES, line.split('\t')))
+                
+                parts = line.split('\t')
+                sentence_id, entity_id, matched_text, start, length, entity_type, mention_type = parts
 
                 yield CandidateHit(
-                    entity_type=HitType(parts['entity_type']),
+                    entity_type=HitType(entity_type),
                     synonym_type=SynonymType.STANDARD,
-                    sentence_id=parts['sentence_id'],
-                    entity_id=parts['entity_id'],
-                    raw_text=parts['matched_text'],
-                    start_position=int(parts['start_position']),
-                    hit_length=int(parts['hit_length']),
-                    mention_type=parts['mention_type']                
+                    sentence_id=sentence_id,
+                    entity_id=entity_id,
+                    raw_text=matched_text,
+                    start_position=int(start),
+                    hit_length=int(length),
+                    mention_type=mention_type                
                 )
     
     @staticmethod        

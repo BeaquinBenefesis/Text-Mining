@@ -57,7 +57,7 @@ class SentenceReader:
     def fetch_text(self, sent_id):
         while self._current_sent_id != sent_id:
             if self._exhausted:
-                raise ValueError(f'Could not find sentence with id {sent_id}')
+                raise ValueError(f'Sentence stream exhausted! Could not find sentence with id {sent_id} in {self._file.name}')
             if self._current_sent_id and not check_sorted(self._current_sent_id, sent_id):
                 raise ValueError(f'Sentence pointer passed requested sentence id!')
             self._advance()

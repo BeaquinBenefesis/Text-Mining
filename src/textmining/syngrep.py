@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 import os
 from textmining.types import HitType
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -11,10 +12,10 @@ SYNGREP_PATH = '/home/proj/software/own/syngrep/syngrepJavaOnGrid.sh'
 @dataclass
 class SynGrepResult:
     hits_path: str
-    context_path: str
-    tmp_path: str
     synfile_map_path: str
     synfile_type_map_path: str
+    context_path: Optional[str]
+    tmp_path: Optional[str]
 
 def _write_synfile_type_map(synonyms: dict[HitType, list[str]], abbrevs: dict[HitType, list[str]], path: str):
     logger.debug(
@@ -65,7 +66,7 @@ def run_syngrep(sentence_pattern: str,
     if abbrev_mode:
         program_args.extend(['-abbrevMode', abbrev_mode])
         if no_abbrev_syn_list:
-            program_args.extend(['-noAbbrevLists', *[os.path.basename(p) for p in no_abbrev_syn_list]])
+            program_args.extend(['-noAbbrevLists', ','.join([os.path.basename(p) for p in no_abbrev_syn_list])])
 
     if within_word:
         program_args.extend(['-withinWord', *[os.path.basename(p) for p in within_word]])
