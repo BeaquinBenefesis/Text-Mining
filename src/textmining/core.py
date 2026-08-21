@@ -15,12 +15,14 @@ class Processor:
     def __init__(self,
                  hits_processor: HitProcessor,
                  normalizers: dict[HitType, EntityNormalizer],
-                 scorer: HitScorer):
+                 scorer: HitScorer,
+                 no_score: set[HitType] = {HitType.MIR}):
         
         self.hits_processor = hits_processor       
         self.normalizers = normalizers
         self.scorer = scorer
         self.core_history = ProcessorHistory()
+        self.no_score = no_score
         logger.info("Core processor initialized")
    
     def _normalize_article(self, article: ArticleRecord, normalization_context: NormalizationContext) -> list[NormalizedHit]:
@@ -32,8 +34,10 @@ class Processor:
         for normalized_hit in normalized_hits:
             self.core_history.record_output_hit(normalized_hit)
             norm_status = normalized_hit.normalization.status
-            if not normalized_hit.normalization.dead and (norm_status == NormalizationStatus.NORMALIZED 
-                                                          or norm_status == NormalizationStatus.FALLBACK):
+            is_dead = normalized_hit.normalization.dead
+            valid_norm_status  = norm_status == NormalizationStatus.NORMALIZED or norm_status == NormalizationStatus.FALLBACK
+            entity_type = normalized_hit.entity_type
+            if not is_dead and valid_norm_status and entity_type not in self.no_score:
                 normalized_hit.score = self.scorer.compute_score(normalized_hit.entity_type, normalized_hit.normalization.normalized_id)
         return normalized_hits
                  

@@ -1,13 +1,15 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from abc import ABC, abstractmethod
 import textmining.resources as res
+from textmining.mirbase import load_mirbase
 from textmining.types import HitType
+from textmining.ontology import OntologyGraph
+from textmining.normalization import MirNormalizer, DefaultNormalizer
+from textmining.normalization_resources import MirResourceLoader
+from textmining.sentence_utils import SentenceReader
+from textmining.syngrep import SynGrepResult
 from textmining.paths import OUTPUTS_DIR
-
-
-def output_path(default: Path) -> Path:
-    return field(default=default, metadata={"skip_validation": True})
-
 
 class ValidatedConfig:
 
@@ -18,30 +20,6 @@ class ValidatedConfig:
         res.validate_paths(self)
 
 
-@dataclass
-class DiseasePipelineConfig(ValidatedConfig):
-    output_name: str
-    n_tasks: int = 50
-    sentence_pattern: str = str(res.CORPUS_DIR / "*.sent")
-    synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_SYNS]})
-    abbrev_synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_ABBREV]})
-    output_dir: Path = output_path(OUTPUTS_DIR / "disease")
-    abbrev_mode: str | None = 'relaxed'
-    no_abbrev_syn_list: list = field(default_factory=lambda: [res.DISEASE_ABBREV])
-    word_char: str = "SYNONYMS"
-    disease_obo_path: Path = res.MONDO_OBO
-
-
-@dataclass
-class ExistingSyngrepDiseaseConfig(ValidatedConfig):
-    output_name: str
-    hits_path: Path
-    synfile_map_path: Path
-    synfile_type_map_path: Path
-    output_dir: Path = output_path(OUTPUTS_DIR / "disease")
-    disease_obo_path: Path = res.MONDO_OBO
-
-    
 @dataclass
 class MirbaseResources:
     """Bundle of miRBase-derived mapping/normalization files, shared by every
@@ -58,80 +36,199 @@ class MirbaseResources:
     precursor_ambi_path: Path = res.MIR_PRECURSOR_AMBI_PATH
     mature_ambi_path: Path = res.MIR_MATURE_AMBI_PATH
 
+@dataclass
+class RuntimeResources:
+    """Constructed, pipeline-owned resources shared across entity configs at
+    normalizer-build time. Normally built automatically from
+    BasePipelineConfig.sentence_path in __post_init__, so entity configs and
+    the sentence reader always agree on which corpus is in play; pass an
+    explicit instance only to override that derived default.
+
+    sentence_reader is opened lazily on first access, so a pipeline that
+    never constructs a normalizer needing it never opens the corpus file.
+    """
+    sentence_path: Path | None = None
+    _sentence_reader: SentenceReader | None = field(default=None, init=False, repr=False)
+
+    @property
+    def sentence_reader(self) -> SentenceReader:
+        if self.sentence_path is None:
+            raise ValueError("RuntimeResources has no sentence_path configured")
+        if self._sentence_reader is None:
+            self._sentence_reader = SentenceReader(self.sentence_path)
+        return self._sentence_reader
+
+    def close(self):
+        if self._sentence_reader is not None:
+            self._sentence_reader.close()
+            self._sentence_reader = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
 
 @dataclass
-class MirnaPipelineConfig(ValidatedConfig):
+class EntityConfig(ABC):
+    entity_type: HitType
+    synonyms: list[Path]
+    no_abbrev: list[Path] = field(default_factory=list)
+    within_word: list[Path] = field(default_factory=list)
+    abbrev_synonyms: list[Path] = field(default_factory=list)
+
+    @abstractmethod
+    def get_graph(self):
+        pass
+
+    def get_normalizer(self, resources: RuntimeResources) -> DefaultNormalizer:
+        return DefaultNormalizer()
+
+@dataclass
+class DiseaseConfig(EntityConfig):
+    entity_type: HitType = HitType.DISEASE
+    synonyms: list[Path] = field(default_factory=lambda:[res.DISEASE_SYNS])
+    abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.DISEASE_ABBREV])
+    no_abbrev: list[Path] = field(default_factory=lambda:[res.DISEASE_ABBREV])
+
+    def get_graph(self):
+        return OntologyGraph.from_obo(
+            obo_path=res.MONDO_OBO,
+            exclude_gci=True
+        )
+
+@dataclass
+class MirConfig(EntityConfig):
+    entity_type: HitType = HitType.MIR
+    synonyms: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
+    no_abbrev: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
+    within_word: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
+    mirbase: MirbaseResources = field(default_factory=MirbaseResources)
+
+    def get_graph(self):
+        return OntologyGraph.from_dict(
+            *load_mirbase(families_tsv=self.mirbase.families_path,
+                          precursors_tsv=self.mirbase.precursor_path,
+                          mature_tsv=self.mirbase.mature_path,
+                          parent_to_child_tsv=self.mirbase.parent_to_child_path)
+            )
+
+    def get_normalizer(self, resources: RuntimeResources) -> MirNormalizer:
+        norm_resources = MirResourceLoader.load(
+            mirna_taxons_path=self.mirbase.mirna_taxons_path,
+            mirna_2_prefix_path=self.mirbase.mirna_to_prefix_path,
+            family_normalizer_path=self.mirbase.family_norm_path,
+            precursor_normalizer_path=self.mirbase.precursor_norm_path,
+            mature_normalizer_path=self.mirbase.mature_norm_path,
+            precursor_ambiguous_path=self.mirbase.precursor_ambi_path,
+            mature_ambiguous_path=self.mirbase.mature_ambi_path,
+        )
+        return MirNormalizer(resources.sentence_reader, norm_resources)
+
+@dataclass
+class TaxonConfig(EntityConfig):
+    entity_type: HitType = HitType.TAXON
+    synonyms: list[Path] = field(default_factory=lambda:[res.SPECIES_SYNS, res.SPECIES_FROM_CL_SYNS])
+
+    def get_graph(self):
+        return OntologyGraph.from_obo(
+            obo_path=res.TAXON_OBO,
+        )
+
+@dataclass
+class TissueConfig(EntityConfig):
+    entity_type: HitType = HitType.TISSUE
+    synonyms: list[Path] = field(default_factory=lambda:[res.TISSUE_SYNS])
+
+    def get_graph(self):
+        return OntologyGraph.from_obo(
+            obo_path=res.TISSUE_OBO,
+        )
+
+@dataclass
+class CellConfig(EntityConfig):
+    entity_type: HitType =  HitType.CELL
+    synonyms: list[Path] = field(default_factory=lambda:[res.CELL_SYNS])
+
+    def get_graph(self):
+        return OntologyGraph.from_obo(
+            obo_path=res.CELL_OBO,
+        )
+
+@dataclass
+class PathwayConfig(EntityConfig):
+    entity_type: HitType =  HitType.PATHWAY
+    synonyms: list[Path] = field(default_factory=lambda:[res.PATHWAY_SYNS])
+
+    def get_graph(self):
+        return OntologyGraph.from_obo(
+            obo_path=res.CELL_OBO,
+        )
+    
+@dataclass
+class BpConfig(EntityConfig):
+    entity_type: HitType =  HitType.BIOLOGICAL_PROCESS
+    synonyms: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_SYNS])
+
+    def get_graph(self):
+        return OntologyGraph.from_obo(
+            obo_path=res.GO_OBO,
+        )
+
+@dataclass(kw_only=True)
+class BasePipelineConfig(ValidatedConfig):
     output_name: str
-    n_tasks: int = 50
+    output_dir: Path = field(metadata={"skip_validation": True})
+    entity_configs: list[EntityConfig]
+    sentence_path: Path = res.SENTENCES_SORTED
+    runtime_resources: RuntimeResources | None = None
+
+    def __post_init__(self) -> None:
+        if self.runtime_resources is None:
+            self.runtime_resources = RuntimeResources(self.sentence_path)
+        super().__post_init__()
+
+@dataclass(kw_only=True)
+class SyngrepInputs:
     sentence_pattern: str = str(res.CORPUS_DIR / "*.sent")
-    synonyms: dict = field(default_factory=lambda: {
-        HitType.MIR: [res.MIR_SYNS],
-        HitType.TAXON: [res.SPECIES_SYNS, res.SPECIES_FROM_CL_SYNS],
-    })
-    output_dir: Path = output_path(OUTPUTS_DIR / "mirna")
-    abbrev_mode: str = 'relaxed'
-    no_abbrev_syn_list: list = field(default_factory=lambda: [res.MIR_SYNS])
-    within_word: list = field(default_factory=lambda: [res.MIR_SYNS.name])
-    sentence_path: Path = res.SENTENCES_SORTED
-    mirbase: MirbaseResources = field(default_factory=MirbaseResources)
-    taxon_obo_path: Path = res.TAXON_OBO
-
-
-@dataclass
-class ExistingSyngrepMirnaConfig(ValidatedConfig):
-    output_name: str
-    hits_path: Path
-    synfile_map_path: Path
-    synfile_type_map_path: Path
-    synonyms: dict = field(default_factory=lambda: {
-        HitType.MIR: [res.MIR_SYNS],
-        HitType.TAXON: [res.SPECIES_SYNS, res.SPECIES_FROM_CL_SYNS],
-    })
-    output_dir: Path = output_path(OUTPUTS_DIR / "mirna")
-    sentence_path: Path = res.SENTENCES_SORTED
-    mirbase: MirbaseResources = field(default_factory=MirbaseResources)
-    taxon_obo_path: Path = res.TAXON_OBO
-
-
-@dataclass
-class CompleteConfig(ValidatedConfig):
-    output_name: str
     n_tasks: int = 50
-    sentence_pattern: str = str(res.CORPUS_DIR / "*.sent")
-    output_dir: Path = output_path(OUTPUTS_DIR / "complete_run")
-    sentence_path: Path = res.SENTENCES_SORTED
-    mirbase: MirbaseResources = field(default_factory=MirbaseResources)
-    synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_SYNS],
-                                                    HitType.MIR: [res.MIR_SYNS],
-                                                    HitType.TAXON: [res.SPECIES_SYNS, res.SPECIES_FROM_CL_SYNS],
-                                                    HitType.CELL: [res.CELL_SYNS],
-                                                    HitType.TISSUE: [res.TISSUE_SYNS],
-                                                    HitType.PATHWAY: [res.PATHWAY_SYNS],
-                                                    HitType.BIOLOGICAL_PROCESS: [res.BIOLOGICAL_PROCESS_SYNS]})
-    abbrev_synonyms: dict = field(default_factory=lambda: {HitType.DISEASE: [res.DISEASE_ABBREV]})
+    word_char: str = 'SYNONYMS'
     abbrev_mode: str | None = 'relaxed'
-    no_abbrev_syn_list: list = field(default_factory=lambda: [res.DISEASE_ABBREV, res.MIR_SYNS])
-    within_word: list = field(default_factory=lambda: [res.MIR_SYNS.name])
-    taxon_obo_path: Path = res.TAXON_OBO
-    disease_obo_path: Path = res.MONDO_OBO
-    cell_obo_path: Path = res.CELL_OBO
-    tissue_obo_path: Path = res.TISSUE_OBO
-    pathway_obo_path: Path = res.PATHWAY_OBO
-    bp_obo_path: Path = res.GO_OBO
+
+@dataclass(kw_only=True)
+class PipelineConfig(SyngrepInputs, BasePipelineConfig):
+    ...
+    
+    @property
+    def synonym_paths(self) -> dict[HitType, list[Path]]:
+        return {
+            e.entity_type: e.synonyms for e in self.entity_configs
+        }
+    
+    @property
+    def abbrev_paths(self) -> dict[HitType, list[Path]]:
+        return {
+            e.entity_type: e.abbrev_synonyms for e in self.entity_configs if e.abbrev_synonyms
+        }
+    
+    @property
+    def within_word(self) -> list[Path]:
+        return [p for e in self.entity_configs for p in e.within_word]
+    
+    @property
+    def no_abbrev_file_names(self) -> list[Path]:
+        return [p for e in self.entity_configs for p in e.no_abbrev]
+
+@dataclass(kw_only=True)
+class ExistingPipelineConfig(BasePipelineConfig):
+    syngrep_result: SynGrepResult
 
 
-@dataclass
-class ExistingSyngrepCompleteConfig(ValidatedConfig):
-    output_name: str
-    hits_path: Path
-    synfile_map_path: Path
-    synfile_type_map_path: Path
-    output_dir: Path = output_path(OUTPUTS_DIR / "complete_run")
-    sentence_path: Path = res.SENTENCES_SORTED
-    mirbase: MirbaseResources = field(default_factory=MirbaseResources)
-    taxon_obo_path: Path = res.TAXON_OBO
-    disease_obo_path: Path = res.MONDO_OBO
-    cell_obo_path: Path = res.CELL_OBO
-    tissue_obo_path: Path = res.TISSUE_OBO
-    pathway_obo_path: Path = res.PATHWAY_OBO
-    bp_obo_path: Path = res.GO_OBO
+@dataclass(kw_only=True)
+class MirnaPipelineConfig(PipelineConfig):
+    entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), TaxonConfig()])
+
+@dataclass(kw_only=True)
+class DiseasePipelineConfig(PipelineConfig):
+    entity_configs: list[EntityConfig] = field(default_factory=lambda:[DiseaseConfig()])
