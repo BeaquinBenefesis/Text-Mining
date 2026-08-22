@@ -163,8 +163,8 @@ class PathwayConfig(EntityConfig):
 
     def get_graph(self):
         return OntologyGraph.from_obo(
-            obo_path=res.CELL_OBO,
-        )
+            obo_path=res.PATHWAY_OBO,
+        )   
     
 @dataclass
 class BpConfig(EntityConfig):

@@ -1,6 +1,8 @@
 import dataclasses
 from pathlib import Path
-
+from dataclasses import dataclass
+from textmining.models import HitType
+from textmining import external
 
 
 ## CORPUS
@@ -10,13 +12,30 @@ CORPUS_SAMPLE = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/
 CORPUS_SAMPLE_SMALLER = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/corpus/samples/sample_1.sent")
 
 ## ONTOLOGY
-ONTOLOGIES_DIR = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies")
-MONDO_OBO = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/diseases/mondo_disease_ontology.obo")
-TAXON_OBO = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/taxonomy/ncbi_taxonomy.obo")
-CELL_OBO = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/cell/cell_ontology_base.obo")
-TISSUE_OBO = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/cell/brenda_tissue_ontology.obo")
-PATHWAY_OBO = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/pathways/pathway_ontology.obo")
-GO_OBO = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/ontologies/pathways/gene_ontology.obo")
+ONTOLOGIES_DIR = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/ontologies")
+MONDO_OBO = ONTOLOGIES_DIR / "mondo_disease_ontology.obo"
+TAXON_OBO = ONTOLOGIES_DIR / "ncbi_taxonomy.obo"
+CELL_OBO = ONTOLOGIES_DIR / "cell_ontology_base.obo"
+TISSUE_OBO = ONTOLOGIES_DIR / "brenda_tissue_ontology.obo"
+PATHWAY_OBO = ONTOLOGIES_DIR / "pathway_ontology.obo"
+GO_OBO = ONTOLOGIES_DIR / "gene_ontology.obo"
+
+@dataclass(frozen=True)
+class OntologySource:
+    hit_type: HitType
+    local_path: Path
+    url: str | None
+    cache_path: Path
+
+ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
+    HitType.DISEASE: OntologySource(HitType.DISEASE, MONDO_OBO, url=external.MONDO_OBO_URL, cache_path=MONDO_OBO.with_suffix('.pkl')),
+    HitType.TAXON:   OntologySource(HitType.TAXON, TAXON_OBO, url=external.TAXON_OBO_URL, cache_path=TAXON_OBO.with_suffix('.pkl')),
+    HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl')),
+    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl')),
+    HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl')),
+    HitType.BIOLOGICAL_PROCESS: OntologySource(HitType.BIOLOGICAL_PROCESS, GO_OBO, url=external.GO_OBO_URL, cache_path=GO_OBO.with_suffix('.pkl')),
+}
+
 
 ## SYNONYM
 TISSUE_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/bto.syn")

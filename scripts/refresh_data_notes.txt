@@ -1,0 +1,17 @@
+Refresh-data task (started 2026-08-22): building scripts/refresh_data.py to refresh ontology
+.obo files/caches (and later synonym lists) instead of trusting stale pickles silently. Design
+agreed so far: a source-of-truth registry (OntologySource, keyed by HitType) lives in
+resources.py, combining each ontology's local .obo path with its OBO Foundry URL (renamed to
+*_OBO_URL in external.py to avoid clashing names with resources.py's *_OBO path constants) and
+a derived cache_path (local_path.with_suffix('.pkl')). MIR has no entry since MirConfig builds
+its graph from miRBase TSVs, not an .obo. refresh_ontology(source) is meant to be the one
+primitive that fetches/hashes/compares against the cached pickle's stored hash and prompts
+before rebuilding — pipeline code (config.py's get_graph/load path) should never touch the
+network or block on input, only this standalone script does.
+
+Still open: whether --offline means "check local .obo file instead of URL" or "skip sources
+with no url entirely" for DISEASE/TAXON which have url=None; and whether synonym
+re-extraction (extract_synonyms.py) should auto-run after a successful ontology rebuild or
+just print a manual follow-up step, since synonym files may involve manual curation.
+Also found + fixed in this session: PathwayConfig.get_graph() was loading res.CELL_OBO
+instead of res.PATHWAY_OBO (copy-paste bug, config.py).
