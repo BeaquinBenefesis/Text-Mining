@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from abc import ABC, abstractmethod
 import textmining.resources as res
 from textmining.mirbase import load_mirbase
 from textmining.types import HitType
@@ -71,16 +70,24 @@ class RuntimeResources:
 
 
 @dataclass
-class EntityConfig(ABC):
+class EntityConfig():
     entity_type: HitType
     synonyms: list[Path]
     no_abbrev: list[Path] = field(default_factory=list)
     within_word: list[Path] = field(default_factory=list)
     abbrev_synonyms: list[Path] = field(default_factory=list)
 
-    @abstractmethod
     def get_graph(self):
-        pass
+        source = res.ONTOLOGY_SOURCES.get(self.entity_type)
+        if not source:
+            raise ValueError(f'No ontology source stored for entity type: {self.entity_type}')
+        if source.cache_path and source.cache_path.exists():
+            return OntologyGraph.load(source.cache_path)
+        else:
+            return OntologyGraph.from_obo(
+                obo_path=source.local_path,
+                **source.obo_kwargs
+            )
 
     def get_normalizer(self, resources: RuntimeResources) -> DefaultNormalizer:
         return DefaultNormalizer()
@@ -92,11 +99,6 @@ class DiseaseConfig(EntityConfig):
     abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.DISEASE_ABBREV])
     no_abbrev: list[Path] = field(default_factory=lambda:[res.DISEASE_ABBREV])
 
-    def get_graph(self):
-        return OntologyGraph.from_obo(
-            obo_path=res.MONDO_OBO,
-            exclude_gci=True
-        )
 
 @dataclass
 class MirConfig(EntityConfig):
@@ -131,50 +133,29 @@ class TaxonConfig(EntityConfig):
     entity_type: HitType = HitType.TAXON
     synonyms: list[Path] = field(default_factory=lambda:[res.SPECIES_SYNS, res.SPECIES_FROM_CL_SYNS])
 
-    def get_graph(self):
-        return OntologyGraph.from_obo(
-            obo_path=res.TAXON_OBO,
-        )
 
 @dataclass
 class TissueConfig(EntityConfig):
     entity_type: HitType = HitType.TISSUE
     synonyms: list[Path] = field(default_factory=lambda:[res.TISSUE_SYNS])
 
-    def get_graph(self):
-        return OntologyGraph.from_obo(
-            obo_path=res.TISSUE_OBO,
-        )
 
 @dataclass
 class CellConfig(EntityConfig):
     entity_type: HitType =  HitType.CELL
     synonyms: list[Path] = field(default_factory=lambda:[res.CELL_SYNS])
 
-    def get_graph(self):
-        return OntologyGraph.from_obo(
-            obo_path=res.CELL_OBO,
-        )
-
 @dataclass
 class PathwayConfig(EntityConfig):
     entity_type: HitType =  HitType.PATHWAY
     synonyms: list[Path] = field(default_factory=lambda:[res.PATHWAY_SYNS])
 
-    def get_graph(self):
-        return OntologyGraph.from_obo(
-            obo_path=res.PATHWAY_OBO,
-        )   
     
 @dataclass
 class BpConfig(EntityConfig):
     entity_type: HitType =  HitType.BIOLOGICAL_PROCESS
     synonyms: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_SYNS])
 
-    def get_graph(self):
-        return OntologyGraph.from_obo(
-            obo_path=res.GO_OBO,
-        )
 
 @dataclass(kw_only=True)
 class BasePipelineConfig(ValidatedConfig):

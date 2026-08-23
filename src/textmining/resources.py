@@ -1,8 +1,9 @@
 import dataclasses
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from textmining.models import HitType
 from textmining import external
+from textmining.synonym_utils import ExtractedSynonymSpec
 
 
 ## CORPUS
@@ -26,10 +27,19 @@ class OntologySource:
     local_path: Path
     url: str | None
     cache_path: Path
+    obo_kwargs: dict = field(default_factory=dict)
+
 
 ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
-    HitType.DISEASE: OntologySource(HitType.DISEASE, MONDO_OBO, url=external.MONDO_OBO_URL, cache_path=MONDO_OBO.with_suffix('.pkl')),
-    HitType.TAXON:   OntologySource(HitType.TAXON, TAXON_OBO, url=external.TAXON_OBO_URL, cache_path=TAXON_OBO.with_suffix('.pkl')),
+    HitType.DISEASE: OntologySource(HitType.DISEASE, 
+                                    MONDO_OBO,
+                                    url=external.MONDO_OBO_URL,
+                                    cache_path=MONDO_OBO.with_suffix('.pkl'), 
+                                    obo_kwargs={'exclude_gci': True}),
+    HitType.TAXON:   OntologySource(HitType.TAXON, 
+                                    TAXON_OBO,
+                                    url=external.TAXON_OBO_URL,     
+                                    cache_path=TAXON_OBO.with_suffix('.pkl')),
     HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl')),
     HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl')),
     HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl')),
@@ -47,6 +57,16 @@ SPECIES_FROM_CL_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaText
 MIR_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/mir_regex.syn")
 PATHWAY_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/pw.syn")
 BIOLOGICAL_PROCESS_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/go.syn")
+
+
+EXTRACTABLE_SYNONYMS: dict[HitType, list[ExtractedSynonymSpec]] = {
+    HitType.DISEASE:  [ExtractedSynonymSpec(DISEASE_SYNS, roots=['MONDO:0000001'])],
+    HitType.CELL:     [ExtractedSynonymSpec(CELL_SYNS, roots=['CL:0000000'])],
+    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, roots=['BTO:0000042', 'BTO:0001494', 'BTO:0001490', 'BTO:0001481'])],
+    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, roots=['PW:0000001'])],
+    HitType.BIOLOGICAL_PROCESS: [ExtractedSynonymSpec(BIOLOGICAL_PROCESS_SYNS, roots=['GO:0008150'])],
+}
+
 
 ## MIRNA DATA
 MIR_FAMILY_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/mappings/families.tsv")

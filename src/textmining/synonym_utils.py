@@ -3,6 +3,7 @@ import os
 from collections import defaultdict, Counter
 from typing import Iterator
 from pathlib import Path
+from dataclasses import dataclass
 
 def read_synfile(file) -> defaultdict:
     line_count = 0
@@ -208,3 +209,14 @@ def merge_synonyms(input_file, output_file):
             # Join synonyms back with '|'
             synonyms_string = "|".join(sorted(synonyms_set))
             f.write(f"{id_part}:{synonyms_string}\n")
+
+@dataclass(frozen=True)
+class ExtractedSynonymSpec:
+    """A synonym file that IS machine-extractable from its HitType's own
+    ontology via OntologyGraph.extract_synonyms(roots)/extract_synonyms.py.
+    Only used by refresh_data.py to know what to regenerate after an
+    ontology rebuild. Synonym files
+    with no clean root, or not derived from an .obo at all (e.g. TAXON's
+    LINNAEUS-derived files), simply have no entry here."""
+    output_path: Path
+    roots: list[str] | None = None

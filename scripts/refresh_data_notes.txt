@@ -9,9 +9,181 @@ primitive that fetches/hashes/compares against the cached pickle's stored hash a
 before rebuilding — pipeline code (config.py's get_graph/load path) should never touch the
 network or block on input, only this standalone script does.
 
-Still open: whether --offline means "check local .obo file instead of URL" or "skip sources
-with no url entirely" for DISEASE/TAXON which have url=None; and whether synonym
-re-extraction (extract_synonyms.py) should auto-run after a successful ontology rebuild or
-just print a manual follow-up step, since synonym files may involve manual curation.
-Also found + fixed in this session: PathwayConfig.get_graph() was loading res.CELL_OBO
-instead of res.PATHWAY_OBO (copy-paste bug, config.py).
+Also found + fixed in this session (2026-08-22): PathwayConfig.get_graph() was loading
+res.CELL_OBO instead of res.PATHWAY_OBO (copy-paste bug, config.py).
+
+--- Decisions made 2026-08-23 ---
+
+1. Pickle-caching IS in scope, not a "maybe later": get_graph() will eventually do
+   "cache_path exists -> OntologyGraph.load(cache_path), else from_obo(...)". Per
+   OntologyGraph.load's own docstring (ontology.py:126-130), the caller is responsible for
+   invalidating a stale cache — that caller is refresh_ontology, not get_graph. get_graph()
+   stays dumb: no network, no hashing, no prompting.
+
+2. All six OntologySource entries currently have real URLs (external.py's *_OBO_URL
+   constants) — the "DISEASE/TAXON have url=None" open question from the original design
+   session is stale/moot, nothing has url=None anymore. --offline semantics question is
+   correspondingly less urgent but still worth deciding for robustness.
+
+3. from_obo kwargs (relationship, exclude_gci, ignore_obsolete) move onto OntologySource as
+   an obo_kwargs: dict field (default {}), instead of being hardcoded inside each
+   EntityConfig.get_graph() body. Reason: get_graph() and refresh_ontology() both need the
+   same parse recipe to build a graph, and hardcoding it separately in two places is exactly
+   how the CELL_OBO/PATHWAY_OBO copy-paste bug happened. Only DISEASE needs a non-default
+   entry: obo_kwargs={'exclude_gci': True}.
+   Follow-up refactor (NOT done yet, hold off until refresh_ontology + the cache-check branch
+   of get_graph() both exist and the shape is confirmed): the six get_graph() overrides in
+   config.py collapse to near-identical bodies once they all read from
+   res.ONTOLOGY_SOURCES[self.entity_type] — consider hoisting a default get_graph() onto the
+   base EntityConfig class. MirConfig stays a genuine override (from_dict/miRBase TSVs, no
+   OntologySource entry).
+
+4. Hash storage: since refresh_ontology now builds/owns the pickle (not just the raw .obo),
+   store the hash as a source_hash attribute ON the pickled OntologyGraph itself (traveling
+   with the pickle via save()/load()), not a separate sidecar file — avoids a second file
+   that can independently go stale.
+
+5. Synonym re-extraction question (still partially open): extract_synonyms.py currently
+   re-parses the .obo from scratch with its own --relationship/--exclude-gci/
+   --no-ignore-obsolete flags (extract_synonyms.py:36-55) — a second copy of the same parse
+   recipe now living on OntologySource.obo_kwargs. If refresh_data.py ever drives synonym
+   re-extraction itself, it should reuse the OntologyGraph it just built/loaded and call
+   graph.extract_synonyms(roots) directly, not shell out to the script re-typing parse flags.
+   The only genuinely new parameter needed beyond obo_kwargs is `roots` (extract_synonyms.py's
+   --roots, a root-ID subset filter applied post-parse).
+
+   Important complication found: not every synonym file is machine-extractable from an
+   entity's own ontology. TaxonConfig.synonyms (config.py:132) is BOTH SPECIES_SYNS and
+   SPECIES_FROM_CL_SYNS, and neither is extract_synonyms.py output — both are LINNAEUS's (an
+   external biomedical taxon-tagging tool) dictionaries, static external resources. So
+   TaxonConfig has an OntologySource entry (TAXON_OBO is still used to build/score the graph)
+   but should yield ZERO entries in whatever extractable_synonyms list gets added — its
+   synonym files are entirely static, despite TAXON_OBO existing and being refreshable.
+   More generally: `roots` can't be a single flat field on EntityConfig paired by list index
+   with `synonyms` — some synonym files have no ontology root to speak of and must never be
+   touched by auto re-extraction.
+   Proposed shape: pair roots with individual output files rather than the whole config,
+   e.g. an ExtractedSynonymSpec(output_path: Path, roots: list[str] | None) dataclass, with
+   a new `extractable_synonyms: list[ExtractedSynonymSpec]` field only on configs that have
+   machine-extractable synonym files. Files like SPECIES_FROM_CL_SYNS simply never appear in
+   that list — they stay static/manually-maintained, same as if they lived outside res.py
+   entirely. Still undecided: auto-run after rebuild vs. print manual follow-up step, for the
+   files that ARE in scope.
+
+--- Sketch of refresh_ontology flow (conceptual, not final code) ---
+
+def refresh_ontology(source: OntologySource, offline: bool = False):
+    cached = OntologyGraph.load(source.cache_path) if source.cache_path.exists() else None
+
+    if offline or source.url is None:
+        if cached is None:
+            build_and_save(source)   # first run, nothing to compare against
+        return
+
+    remote_bytes = fetch(source.url)
+    new_hash = hashlib.sha256(remote_bytes).hexdigest()
+
+    if cached is not None and cached.source_hash == new_hash:
+        log "up to date"; return
+
+    if not prompt(f"{source.hit_type}: hash changed. Rebuild?"):
+        return
+
+    write(source.local_path, remote_bytes)
+    graph = OntologyGraph.from_obo(source.local_path, **source.obo_kwargs)
+    graph.source_hash = new_hash
+    graph.save(source.cache_path)
+
+--- refresh_data.py implemented 2026-08-23 ---
+
+scripts/refresh_data.py now has a working refresh_ontology()/main() (no OntologyGraph
+changes needed — it has no __slots__, so graph.source_hash = new_hash works as a plain
+dynamic attribute and rides along through save()/load() since those just pickle __dict__).
+
+Resolved along the way:
+- (Resolved) First-run prompt: when there's no cached pickle yet, refresh_ontology builds
+  straight away without calling _prompt_rebuild — "rebuild?" doesn't make sense when there's
+  nothing to compare against yet. _prompt_rebuild's old_hash param is now non-Optional
+  (str, not str | None) since it's only ever called when a cache already exists.
+- (Resolved) --offline semantics: offline=True (or url is None) skips the network entirely;
+  if no cache exists yet it builds straight from source.local_path (whatever .obo is already
+  on disk), otherwise it just keeps the existing cache untouched. Same branch handles both
+  the --offline flag and DISEASE/TAXON-style url=None sources uniformly (moot now since
+  nothing actually has url=None, but the branch still works for that case).
+- (Resolved) SPECIES_SYNS is also LINNAEUS, not extract_synonyms.py output — TaxonConfig
+  contributes nothing to extractable_synonyms despite having an OntologySource/TAXON_OBO
+  entry for graph-building purposes.
+- HTTPError vs URLError (incl. timeout) caught per-source in main()'s loop, not inside
+  refresh_ontology/_fetch_obo_bytes — one unreachable ontology server logs and moves on to
+  the next source instead of aborting the whole run. HTTPError must be caught before
+  URLError (it's a subclass); a timeout surfaces as URLError with .reason being a
+  TimeoutError instance.
+- Console logging needed logging.basicConfig() in main() — textmining's existing
+  setup_logging() (logging_utils.py) is pipeline-run-shaped (needs output_dir/run_name,
+  writes a log file under OUTPUTS_DIR) and doesn't fit a standalone maintenance script with
+  no pipeline output directory of its own.
+
+--- Resolved 2026-08-23 (continued) ---
+
+- (Resolved) Auto-run synonym re-extraction after a successful ontology rebuild — chosen over
+  a manual follow-up step, since extraction is deterministic given a graph and only runs when
+  something actually changed. refresh_ontology() now returns the OntologyGraph it
+  built/loaded (or None when nothing changed / rebuild declined / offline-with-existing-cache).
+  New refresh_synonyms(source, graph) reads res.EXTRACTABLE_SYNONYMS.get(source.hit_type, [])
+  and rewrites each spec's output_path via write_syn_file(spec.output_path,
+  graph.extract_synonyms(spec.roots)); main()'s loop calls it right after refresh_ontology()
+  only when the return value is not None. TAXON/MIR (no EXTRACTABLE_SYNONYMS entry) are a
+  silent no-op via the .get(..., []) default.
+- (Resolved) Deterministic .syn output: OntologyGraph.extract_synonyms (ontology.py:341-365)
+  previously yielded in whatever order `indices` (a set, when root_ids is given) happened to
+  iterate, and each synonym list was list(set(syns)) — both unordered across runs. Now sorts
+  the per-term synonym list (sorted(set(syns))) and sorts the final (term_id, syns) list by
+  term_id before yielding. This is shared by extract_synonyms.py too, so both paths produce
+  clean, diffable .syn files now.
+
+--- New open issue found 2026-08-23: abbreviation extraction needs generalizing ---
+
+scripts/disease_testing.py implements a second, DISEASE-only synonym-extraction path (using
+obonet/networkx directly, not OntologyGraph) that additionally splits out ABBREVIATION-tagged
+synonyms into their own file (disease_abbreviation.syn, format "<id>:<abbr>@EXACT|..."), via
+get_synonyms()'s ABBREVIATION_TAGS = {"ABBREVIATION", "OMO:0003012"} check against the synonym
+line's third quoted field (the OBO synonym *type*/xref, not just its EXACT/RELATED/BROAD/NARROW
+*scope*). res.DISEASE_ABBREV (resources.py:53) already exists as a path but is NOT in
+EXTRACTABLE_SYNONYMS — it was treated as a static file up to now, but per disease_testing.py it
+should actually be machine-extractable, same as DISEASE_SYNS.
+
+Root cause: OntologyGraph.get_exact_synonyms (ontology.py:30-43) only parses `text` + `scope`
+out of each `synonym: "..." SCOPE TYPE [...]` line and discards TYPE entirely — the shared
+pipeline currently has no concept of "abbreviation" at all, so this can't be bolted on without
+touching get_exact_synonyms/extract_synonyms's return shape.
+
+Before generalizing, need to resolve:
+1. get_exact_synonyms/extract_synonyms need to surface the synonym TYPE (or at minimum an
+   is_abbreviation bool) per synonym, not just discard it. Changes the per-term synonym
+   representation everywhere extract_synonyms is consumed (refresh_synonyms, extract_synonyms.py) —
+   check no other caller depends on the current flat list[str] shape.
+2. ExtractedSynonymSpec (synonym_utils.py:213-222) only has output_path + roots — needs a way
+   to say "split this ontology's terms into two output files by tag" (e.g. an optional
+   abbreviation_output_path field) without forcing every HitType to have one.
+3. Secondary complication, NOT the main ask but found while reading disease_testing.py: it
+   merges TWO obo sources (MONDO_OBO_PATH + DOID_OBO_PATH, matched via skos:exactMatch
+   property_value cross-references) into one synonym/abbreviation set, whereas
+   OntologySource/refresh_ontology currently assume one .obo per HitType. DISEASE's
+   OntologySource/ONTOLOGY_SOURCES entry only points at MONDO_OBO — if the DOID merge is meant
+   to stay part of the generalized pipeline, that's a bigger structural change than the
+   abbreviation-splitting itself and should be scoped/decided separately.
+4. ABBREVIATION_TAGS is disease_testing.py-specific ({"ABBREVIATION", "OMO:0003012"}) — worth
+   checking whether other ontologies (CELL, PATHWAY, GO, TISSUE) even use these OBO synonym
+   type tags before assuming this generalizes cleanly to all EXTRACTABLE_SYNONYMS entries, or
+   whether it stays DISEASE-specific with an opt-in flag.
+
+Explicitly blocking any refresh_data.py run that touches DISEASE_SYNS until this is resolved,
+since disease_testing.py's output for disease.syn is not yet reproduced by
+OntologyGraph.extract_synonyms (no abbreviation split, no DOID cross-reference merge) — running
+refresh now would silently regress disease.syn relative to disease_testing.py's output.
+
+Still open / not yet decided:
+- refresh_data.py is untested against a real network call so far — worth a manual run
+  (maybe with --only against one small-ish source like PATHWAY) before trusting it against
+  all six. Should also hold off on DISEASE specifically until the abbreviation/DOID-merge
+  question above is resolved.

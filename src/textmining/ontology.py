@@ -9,6 +9,7 @@ import rustworkx as rx
 from typing import Iterator, Iterable
 import io
 import urllib.request
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -62,26 +63,17 @@ def read_obo(
     source: str | Path,
     ignore_obsolete: bool = True,
     exclude_gci: bool = False,
-    from_url: bool = False
 ):
-    source = str(source)
-    if from_url:
-        req = urllib.request.Request(
-            source, 
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        )
-        with urllib.request.urlopen(req) as response:
-            with io.TextIOWrapper(response, encoding="utf-8") as text_stream:
-                return _process_obo_lines(text_stream, ignore_obsolete, exclude_gci)
-    else:
-        with Path(source).open("r", encoding="utf-8") as f:
-            return _process_obo_lines(f, ignore_obsolete, exclude_gci)
+    with Path(source).open("r", encoding="utf-8") as f:
+        return _process_obo_lines(f, ignore_obsolete, exclude_gci)
         
 
 class OntologyGraph:
-    
+
+    source_hash: str | None = None
+
     def __init__(self,
-                 graph: rx.PyDiGraph, 
+                 graph: rx.PyDiGraph,
                  relationship: str):
         self.graph = graph
         self.relationship = relationship
@@ -114,7 +106,6 @@ class OntologyGraph:
             graph_name, self.node_num, len(self.roots), time.monotonic() - t0)
 
     def save(self, path: str | Path):
-        """Pickle this OntologyGraph (including caches) to `path`."""
         t0 = time.monotonic()
         with Path(path).open('wb') as f:
             pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -123,11 +114,6 @@ class OntologyGraph:
 
     @classmethod
     def load(cls, path: str | Path) -> 'OntologyGraph':
-        """Load an OntologyGraph previously written by `save`. No validation
-        that `path` matches any particular source .obo — the caller is
-        responsible for invalidating a stale cache (see §6.2's data-version
-        point: a cached graph should be re-saved whenever the source ontology
-        release changes)."""
         t0 = time.monotonic()
         with Path(path).open('rb') as f:
             obj = pickle.load(f)
@@ -139,18 +125,19 @@ class OntologyGraph:
 
     @classmethod
     def from_obo(cls,
-                 obo_path: str | Path, 
+                 obo_path: str | Path,
                  relatioship: str = 'is_a',
                  exclude_gci: bool = False,
                  ignore_obsolete: bool = True):
-        
         nx_graph = read_obo(source=obo_path,
                             ignore_obsolete=ignore_obsolete,
-                            exclude_gci=exclude_gci,
-                            from_url=False)
-        return cls.from_nx_graph(nx_graph=nx_graph,
+                            exclude_gci=exclude_gci,)
+        graph = cls.from_nx_graph(nx_graph=nx_graph,
                                  relationship=relatioship,
                                  name=obo_path)
+        graph.source_hash = hashlib.sha256(Path(obo_path).read_bytes()).hexdigest()
+
+        return graph
         
     @classmethod
     def from_merge(cls, obo_paths, equivalence_fn, relationship='is_a'):
@@ -207,24 +194,6 @@ class OntologyGraph:
             edge_payload = {"key": k, **data}
             g.add_edge(term_id_to_idx[u], term_id_to_idx[v], edge_payload)
         return cls(g, relationship)
-    
-    @classmethod
-    def from_url(cls, 
-                 url : str,
-                 relationship: str = 'is_a',
-                 exclude_gci: bool = False,
-                 ignore_obsolete: bool = True):
-        nx_graph = read_obo(
-            source=url,
-            ignore_obsolete=ignore_obsolete,
-            exclude_gci=exclude_gci,
-            from_url=True
-        )
-        return cls.from_nx_graph(
-            nx_graph=nx_graph,
-            relationship=relationship,
-            name=url
-        )
     
     @classmethod
     def from_nx_graph(cls, 
@@ -378,6 +347,7 @@ class OntologyGraph:
                 root_idx = self._id_to_idx[root_id]
                 indices.update(rx.descendants(self._rel_subgraph, root_idx) | {root_idx})
 
+        results = []
         for idx in indices:
             data = self._rel_subgraph[idx]
             name = data.get("name") if data else None
@@ -388,8 +358,11 @@ class OntologyGraph:
             exact_syns = get_exact_synonyms(data)
             if exact_syns:
                 syns.extend(exact_syns)
-            syns = list(set(syns))
+            syns = sorted(set(syns))
             term_id_external = to_external_id(term_id)
-            yield (term_id_external, syns)
+            results.append((term_id_external, syns))
+
+        results.sort(key=lambda pair: pair[0])
+        yield from results
             
     
