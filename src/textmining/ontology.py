@@ -8,6 +8,7 @@ import time
 import rustworkx as rx
 from typing import Iterator, Iterable
 import io
+import re
 import urllib.request
 import hashlib
 
@@ -27,20 +28,26 @@ def to_internal_id(term_id: str) -> str:
     prefix, local_id = term_id.split("_", 1)
     return f"{prefix}:{local_id}"
 
-def get_exact_synonyms(node_data: dict):
-    exact_syns = []
+ABBREVIATION_TAGS = {"ABBREVIATION", "OMO:0003012", "OMO:0003000"}
+
+OBO_SYNONYM_RE = re.compile(
+    r'^\s*"((?:[^"\\]|\\.)*)"\s+(EXACT|RELATED|BROAD|NARROW)(?:\s+([^\s\[]+))?'
+)
+
+def get_exact_synonyms(node_data: dict) -> tuple[list[str], list[str]]:
+    """EXACT-scope synonyms for a node, split into (synonyms, abbreviations)
+    by the OBO synonym TYPE field (e.g. "ABBREVIATION")."""
+    syns, abbrevs = [], []
     for s in node_data.get("synonym", []):
-        parts = s.split('"')
-        
-        if len(parts) > 2:
-            text = parts[1]
-            scope_parts = parts[2].strip().split()
-            if not scope_parts:  # no scope word present, skip
-                continue
-            scope = scope_parts[0]  # EXACT / RELATED / BROAD / NARROW
-            if scope == "EXACT":
-                exact_syns.append(text)
-    return exact_syns
+        match = OBO_SYNONYM_RE.match(s)
+        if not match:
+            continue
+        text, scope, syn_type = match.groups()
+        if scope != "EXACT":
+            continue
+        text = text.replace(r'\"', '"')
+        (abbrevs if syn_type in ABBREVIATION_TAGS else syns).append(text)
+    return syns, abbrevs
 
 def _process_obo_lines(lines: Iterable[str], ignore_obsolete: bool, exclude_gci: bool):
     cleaned_lines = []
@@ -339,7 +346,10 @@ class OntologyGraph:
     
     # Root ids in internal format
     def extract_synonyms(self,
-                         root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str]]]:
+                         root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str], list[str]]]:
+        """Yields (term_id, synonyms, abbreviations) per term. `synonyms`
+        always includes the term's name; `abbreviations` is [] for terms
+        with none (most ontologies never tag ABBREVIATION synonym types)."""
         indices = self._rel_subgraph.node_indices()
         if root_ids:
             indices = set()
@@ -354,15 +364,13 @@ class OntologyGraph:
             term_id = data.get("id") if data else None
             if not (data and name and term_id):
                 continue
-            syns = [name]
-            exact_syns = get_exact_synonyms(data)
-            if exact_syns:
-                syns.extend(exact_syns)
-            syns = sorted(set(syns))
+            exact_syns, abbrevs = get_exact_synonyms(data)
+            syns = sorted({name, *exact_syns})
+            abbrevs = sorted(set(abbrevs))
             term_id_external = to_external_id(term_id)
-            results.append((term_id_external, syns))
+            results.append((term_id_external, syns, abbrevs))
 
-        results.sort(key=lambda pair: pair[0])
+        results.sort(key=lambda triple: triple[0])
         yield from results
             
     

@@ -25,7 +25,7 @@ OBO_SYNONYM_RE = re.compile(
     r'^\s*"((?:[^"\\]|\\.)*)"\s+(EXACT|RELATED|BROAD|NARROW)(?:\s+([^\s\[]+))?'
 )
 
-ABBREVIATION_TAGS = {"ABBREVIATION", "OMO:0003012"}
+ABBREVIATION_TAGS = {"ABBREVIATION", "OMO:0003012", "OMO:0003000"}
 
 
 def is_obsolete(node_data: dict) -> bool:

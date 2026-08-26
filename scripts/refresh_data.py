@@ -65,8 +65,14 @@ def refresh_synonyms(source: "res.OntologySource", graph: OntologyGraph) -> None
     (e.g. TAXON, whose .syn files are static LINNAEUS dictionaries) are a
     silent no-op."""
     for spec in res.EXTRACTABLE_SYNONYMS.get(source.hit_type, []):
-        write_syn_file(spec.output_path, graph.extract_synonyms(spec.roots))
+        triples = list(graph.extract_synonyms(spec.roots))
+        write_syn_file(spec.output_path, ((term_id, syns) for term_id, syns, _ in triples))
+        write_syn_file(
+            spec.abbreviation_output_path,
+            ((term_id, abbrevs) for term_id, _, abbrevs in triples if abbrevs),
+        )
         logger.info("%s: re-extracted synonyms -> %s", source.hit_type.name, spec.output_path)
+        logger.info("%s: re-extracted abbreviations -> %s", source.hit_type.name, spec.abbreviation_output_path)
 
 
 def main():

@@ -48,23 +48,28 @@ ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
 
 
 ## SYNONYM
-TISSUE_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/bto.syn")
-CELL_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/cl.syn")
-DISEASE_ABBREV = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/disease_abbreviations.syn")
-DISEASE_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/disease.syn")
-SPECIES_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/linnaeus_species.syn")
-SPECIES_FROM_CL_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/linnaeus_cell_lines.syn")
-MIR_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/mir_regex.syn")
-PATHWAY_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/pw.syn")
-BIOLOGICAL_PROCESS_SYNS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final/go.syn")
+SYNONYM_DIR = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/synonyms/final")
+TISSUE_SYNS = SYNONYM_DIR / "bto.syn"
+TISSUE_ABBREV = SYNONYM_DIR / "tissue_abbreviations.syn"
+CELL_SYNS = SYNONYM_DIR / "cl.syn"
+CELL_ABBREV = SYNONYM_DIR / "cell_abbreviations.syn"
+DISEASE_ABBREV = SYNONYM_DIR / "disease_abbreviations.syn"
+DISEASE_SYNS = SYNONYM_DIR / "disease.syn"
+SPECIES_SYNS = SYNONYM_DIR / "linnaeus_species.syn"
+SPECIES_FROM_CL_SYNS = SYNONYM_DIR / "linnaeus_cell_lines.syn"
+MIR_SYNS = SYNONYM_DIR / "mir_regex.syn"
+PATHWAY_SYNS = SYNONYM_DIR / "pw.syn"
+PATHWAY_ABBREV = SYNONYM_DIR / "pathway_abbreviations.syn"
+BIOLOGICAL_PROCESS_SYNS = SYNONYM_DIR / "go.syn"
+BIOLOGICAL_PROCESS_ABBREV = SYNONYM_DIR / "biological_process_abbreviations.syn"
 
 
 EXTRACTABLE_SYNONYMS: dict[HitType, list[ExtractedSynonymSpec]] = {
-    HitType.DISEASE:  [ExtractedSynonymSpec(DISEASE_SYNS, roots=['MONDO:0000001'])],
-    HitType.CELL:     [ExtractedSynonymSpec(CELL_SYNS, roots=['CL:0000000'])],
-    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, roots=['BTO:0000042', 'BTO:0001494', 'BTO:0001490', 'BTO:0001481'])],
-    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, roots=['PW:0000001'])],
-    HitType.BIOLOGICAL_PROCESS: [ExtractedSynonymSpec(BIOLOGICAL_PROCESS_SYNS, roots=['GO:0008150'])],
+    HitType.DISEASE:  [ExtractedSynonymSpec(output_path=DISEASE_SYNS, abbreviation_output_path=DISEASE_ABBREV, roots=['MONDO:0000001'])],
+    HitType.CELL:     [ExtractedSynonymSpec(output_path=CELL_SYNS, abbreviation_output_path=CELL_ABBREV, roots=['CL:0000000'])],
+    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, abbreviation_output_path=TISSUE_ABBREV, roots=['BTO:0000042', 'BTO:0001494', 'BTO:0001490', 'BTO:0001481'])],
+    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, abbreviation_output_path=PATHWAY_ABBREV, roots=['PW:0000001'])],
+    HitType.BIOLOGICAL_PROCESS: [ExtractedSynonymSpec(BIOLOGICAL_PROCESS_SYNS, abbreviation_output_path=BIOLOGICAL_PROCESS_ABBREV, roots=['GO:0008150'])],
 }
 
 

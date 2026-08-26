@@ -219,4 +219,5 @@ class ExtractedSynonymSpec:
     with no clean root, or not derived from an .obo at all (e.g. TAXON's
     LINNAEUS-derived files), simply have no entry here."""
     output_path: Path
+    abbreviation_output_path: Path
     roots: list[str] | None = None

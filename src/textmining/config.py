@@ -8,7 +8,6 @@ from textmining.normalization import MirNormalizer, DefaultNormalizer
 from textmining.normalization_resources import MirResourceLoader
 from textmining.sentence_utils import SentenceReader
 from textmining.syngrep import SynGrepResult
-from textmining.paths import OUTPUTS_DIR
 
 class ValidatedConfig:
 
@@ -138,23 +137,31 @@ class TaxonConfig(EntityConfig):
 class TissueConfig(EntityConfig):
     entity_type: HitType = HitType.TISSUE
     synonyms: list[Path] = field(default_factory=lambda:[res.TISSUE_SYNS])
+    abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.TISSUE_ABBREV])
+    no_abbrev: list[Path] = field(default_factory=lambda:[res.TISSUE_ABBREV])
 
 
 @dataclass
 class CellConfig(EntityConfig):
     entity_type: HitType =  HitType.CELL
     synonyms: list[Path] = field(default_factory=lambda:[res.CELL_SYNS])
+    abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.CELL_ABBREV])
+    no_abbrev: list[Path] = field(default_factory=lambda:[res.CELL_ABBREV])
 
 @dataclass
 class PathwayConfig(EntityConfig):
     entity_type: HitType =  HitType.PATHWAY
     synonyms: list[Path] = field(default_factory=lambda:[res.PATHWAY_SYNS])
+    abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.PATHWAY_ABBREV])
+    no_abbrev: list[Path] = field(default_factory=lambda:[res.PATHWAY_ABBREV])
 
-    
+
 @dataclass
 class BpConfig(EntityConfig):
     entity_type: HitType =  HitType.BIOLOGICAL_PROCESS
     synonyms: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_SYNS])
+    abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_ABBREV])
+    no_abbrev: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_ABBREV])
 
 
 @dataclass(kw_only=True)
