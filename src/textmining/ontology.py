@@ -349,7 +349,7 @@ class OntologyGraph:
                          root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str], list[str]]]:
         """Yields (term_id, synonyms, abbreviations) per term. `synonyms`
         always includes the term's name; `abbreviations` is [] for terms
-        with none (most ontologies never tag ABBREVIATION synonym types)."""
+        with none."""
         indices = self._rel_subgraph.node_indices()
         if root_ids:
             indices = set()
