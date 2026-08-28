@@ -258,11 +258,24 @@ class HitProcessor:
             groups.append(current_group)
         return groups                                 
     
+    def _resolve_syngrep_hits_entity_ids(self, hit_stream: Iterator[CandidateHit]) -> Iterator[CandidateHit]:
+        entity_id = None
+        for hit in hit_stream:
+            if hit.entity_type == HitType.MIR:
+                yield hit
+            else:
+                entity_id = self.type_to_ontology[hit.entity_type].resolve_id(hit.entity_id)
+                if not entity_id:
+                    logger.error('Could not resolve id: %s', hit.entity_id)
+                    continue
+                else:
+                    hit.entity_id = entity_id
+                    yield hit
+    
     @staticmethod
     def _iter_syngrep_hits(hits_path: str | Path,
                            synfile_map: dict[str, str],
                            synfile_type_map: dict[str, tuple[HitType, bool]],
-                           type_to_ontology: dict[HitType, OntologyGraph],
                            remove_sent_id_prefix=True,
                            low_memory=False) -> Iterator[CandidateHit]:
         with MultiSynFileReader(low_memory) as reader, open(hits_path, 'r') as f:
@@ -308,20 +321,12 @@ class HitProcessor:
 
                 raw_entity_id = reader.extract_id(str(file_path), line_number)
 
-                if hit_type == HitType.MIR:
-                    entity_id = raw_entity_id
-                else:
-                    entity_id = type_to_ontology[hit_type].resolve_id(raw_entity_id)
-                    if not entity_id:
-                        logger.error('Could not resolve id: %s', raw_entity_id)
-                        continue
-
                 yield CandidateHit(
                     entity_type=hit_type,
                     synonym_type=synonym_type,
                     sentence_id=sentence_id,
                     synonym_id=synonym_id,
-                    entity_id=entity_id,
+                    entity_id=raw_entity_id,
                     raw_text=matched_text,
                     start_position=int(start),
                     hit_length=int(length),

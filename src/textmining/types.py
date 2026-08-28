@@ -26,7 +26,7 @@ class NormalizationStatus(str, Enum):
     NORMALIZED = 'NORMALIZED' # Successful exact normalization
     FALLBACK = 'FALLBACK' # Normalized using a fallback heuristic
     #AMBIGUOUS = 'AMBIGUOUS' # Normalization matched multiple entities
-    UNRESOLVED = 'UNRESOLVED' # Could not normalize
+    UNKNOWN_ENTITY = 'UNKNOWN_ENTITY' # Could not normalize
     FILTERED = 'FILTERED' # Probably a false positive, filter out
     IN_BLACKLIST = 'IN_BLACKLIST' # Known terms of high ambiguity, low confidence hit
 

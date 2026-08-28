@@ -1,4 +1,4 @@
-from textmining.config import PipelineConfig, ExistingPipelineConfig, EntityConfig, RuntimeResources
+from textmining.config import PipelineConfig, ExistingSyngrepPipelineConfig, EntityConfig, RuntimeResources
 from textmining.syngrep import run_syngrep
 from textmining.scoring import HitScorer
 from textmining.core import Processor
@@ -38,7 +38,11 @@ def run_pipeline(config: PipelineConfig, debug=logging.INFO):
     )
 
 
-def run_existing_pipeline(config: ExistingPipelineConfig):
+def run_existing_pipeline(config: ExistingSyngrepPipelineConfig, debug=logging.INFO):
+    setup_logging(output_dir = config.output_dir,
+                      run_name = config.output_name,
+                      level=debug
+                      )
     process_hits(
         output_name=config.output_name,
         output_dir=config.output_dir,

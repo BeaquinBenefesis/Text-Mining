@@ -104,7 +104,6 @@ class MirConfig(EntityConfig):
     entity_type: HitType = HitType.MIR
     synonyms: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
     no_abbrev: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
-    within_word: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
     mirbase: MirbaseResources = field(default_factory=MirbaseResources)
 
     def get_graph(self):
@@ -209,7 +208,7 @@ class PipelineConfig(SyngrepInputs, BasePipelineConfig):
         return [p for e in self.entity_configs for p in e.no_abbrev]
 
 @dataclass(kw_only=True)
-class ExistingPipelineConfig(BasePipelineConfig):
+class ExistingSyngrepPipelineConfig(BasePipelineConfig):
     syngrep_result: SynGrepResult
 
 
@@ -220,3 +219,7 @@ class MirnaPipelineConfig(PipelineConfig):
 @dataclass(kw_only=True)
 class DiseasePipelineConfig(PipelineConfig):
     entity_configs: list[EntityConfig] = field(default_factory=lambda:[DiseaseConfig()])
+    
+@dataclass(kw_only=True)
+class MirnaExistingSyngrepPipelineConfig(ExistingSyngrepPipelineConfig):
+    entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), TaxonConfig()])

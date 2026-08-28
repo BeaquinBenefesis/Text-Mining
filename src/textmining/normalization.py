@@ -104,7 +104,7 @@ class MirNormalizer(EntityNormalizer):
                                               target_type=NormalizationTargetType.MIR_FAMILY)
             return [MirNormalizationCandidate(normalization=norm_result)]
         elif not mirbase_prefixes:
-            norm_result = NormalizationResult(NormalizationStatus.UNRESOLVED)
+            norm_result = NormalizationResult(NormalizationStatus.UNKNOWN_ENTITY)
             return [MirNormalizationCandidate(normalization=norm_result)]
         else:
             return self._resolve_by_prefix_intersection(mirna_body=mirna_body,
@@ -125,7 +125,7 @@ class MirNormalizer(EntityNormalizer):
                 "Prefix intersection empty for mirna_body=%s: implied=%s, mirbase=%s",
                 mirna_body, implied_prefixes, mirbase_prefixes,
             )
-            norm_result = NormalizationResult(NormalizationStatus.UNRESOLVED)
+            norm_result = NormalizationResult(NormalizationStatus.UNKNOWN_ENTITY)
             matches.append(MirNormalizationCandidate(normalization=norm_result))
         else:
             for prefix in possible_prefixes:
@@ -152,7 +152,7 @@ class MirNormalizer(EntityNormalizer):
                 target_type = NormalizationTargetType.MIR_PRECURSOR
                 is_dead = precursor_data['dead']
             elif not precursor_data and not mature_data:
-                status = NormalizationStatus.UNRESOLVED
+                status = NormalizationStatus.UNKNOWN_ENTITY
             else:
                 data = precursor_data or mature_data
                 is_dead = data['dead']
@@ -198,3 +198,7 @@ class MirIdMapper:
         return MirIdMapper._id_to_token.get(entity_id)
 
 
+def normalized_successfully(hit: NormalizedHit) -> bool:
+    if not hit.normalization:
+        raise ValueError(f'Tried to group hit that was not normalized! Hit: {hit}')
+    return hit.normalization.status not in (NormalizationStatus.UNKNOWN_ENTITY, NormalizationStatus.FILTERED)
