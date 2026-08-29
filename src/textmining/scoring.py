@@ -17,3 +17,6 @@ class HitScorer:
         internal_id = to_internal_id(normalized_id)
         ic = self._type_to_ontology[entity_type].compute_ic(internal_id)
         return HitScore(ic)
+
+def section_weigth():
+    pass

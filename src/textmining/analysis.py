@@ -36,12 +36,21 @@ class Grouper:
             yield (hit_a, hit_b) if hit_a.entity_type == HitType.MIR else (hit_b, hit_a)
     
     @staticmethod
-    def extract_cooccurrences(hits: Iterator[NormalizedHit]):
+    def extract_cooccurrences(hits: Iterator[NormalizedHit]) -> Iterator[tuple[str, NormalizedHit, NormalizedHit]]:
         for sentence_id, sentence_hits in Grouper.group_by_sentence(hits):
             if len(sentence_hits) < 2:
                 continue
             for (hit_a, hit_b) in Grouper.extract_valid_combinations(sentence_hits):      
                 yield (sentence_id, hit_a, hit_b)        
+
+class Analyzer:
+    
+    def __init__(self):
+        pass
+    
+    def record_coocurrence(co_oc: tuple[str, NormalizedHit, NormalizedHit]):
+        pass
+
 
 class GrouperHistory:
 
