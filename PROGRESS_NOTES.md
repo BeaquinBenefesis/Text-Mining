@@ -37,8 +37,8 @@ Test script: `scripts/exploration/mir_test_sents_recall.py`
 
 5. **THE BIG ONE — plant vs. animal miRNA naming convention mismatch.**
    Root cause of ~21% of all normalization failures (mostly mis-diagnosed
-   earlier in the session as "syngrep can't detect plant miRNAs" — that turned
-   out to be a `ntasks=8` syngrep-sharding artifact, unrelated; see below).
+   earlier in the session as "syngrep can't detect plant miRNAs" — see the
+   `within_word` note below for the actual cause of that detection jump).
 
    miRBase's own dict keys differ by kingdom:
    - Animal: `hsa-mir-21` (dash between body token and digits)
@@ -80,16 +80,20 @@ Test script: `scripts/exploration/mir_test_sents_recall.py`
    `normalized_successfully()` already discards them downstream, so no
    functional issue, just noise in the raw diagnostic file.
 
-## Also noteworthy (not a normalization bug, a test-harness lesson)
+## Also noteworthy (not a normalization bug, a config change)
 
-Running `run_syngrep(..., ntasks=8, ...)` on the 93,521-line test file caused
-syngrep to silently drop ~20% of hits (detection dropped to 78.91%). Switching
-to `ntasks=1` (via `run_pipeline(MirnaPipelineConfig(..., n_tasks=1, ...))`)
-brought detection to 99.89%. This looks like a real parallelism/sharding bug
-in how syngrep splits work across grid tasks for this input — worth keeping in
-mind for any future syngrep run on chunked/sharded input, not just this test.
-Not investigated further this session; flagging so it doesn't get
-re-diagnosed as a regex/synonym coverage problem again.
+The big detection jump (78.91% -> 99.89%) between the first and second run of
+the recall script was **not** a `ntasks` sharding artifact (that was an
+incorrect diagnosis, since corrected). The actual cause: `MirConfig` in
+`config.py` now sets `within_word: list[Path] = [res.MIR_SYNS]` (user added
+this), which is passed through to syngrep as `-withinWord MIR_SYNS`. This
+tells syngrep it's allowed to match a MIR synonym *inside* a larger
+contiguous token rather than only at word boundaries — which is exactly what's
+needed for fused forms like `zma-MIR408a` (no internal delimiters splitting it
+into separate "words"). The original recall script run used a bare
+`run_syngrep(...)` call without `within_word`, which is why so many hits were
+missed there. No parallelism/sharding bug exists; disregard the earlier
+`ntasks` theory entirely.
 
 ## Current state (last full run)
 
@@ -168,10 +172,7 @@ Output files (regenerated each run, not committed):
 1. Decide on the underscore-duplicate-locus fix (`_2`, `_8`, etc.) and whether
    to attempt the dot-notation (`.1`, `.2`) one at all.
 2. Investigate the 107 `bantam` misses at the syngrep/synonym level.
-3. Investigate the `ntasks=8` syngrep hit-dropping issue if you ever run
-   syngrep sharded across grid tasks again — it's a correctness landmine
-   independent of anything miRNA-specific.
-4. Consider whether the plant-species normalization coverage (now that lookups
+3. Consider whether the plant-species normalization coverage (now that lookups
    actually work) reveals anything about scope: is supporting plant miRNAs
    even in scope for the thesis, or should `MirNormalizer`/its resources be
    deliberately animal-only?
