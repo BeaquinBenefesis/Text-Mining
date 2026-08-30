@@ -7,7 +7,7 @@ from typing import Iterator, Optional
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from textmining.types import HitType, SynonymType, GroupStatus
+from textmining.enums import HitType, SynonymType, GroupStatus
 from textmining.models import HitGroup, CandidateHit
 from textmining.article_utils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
 from textmining.ontology import OntologyGraph
@@ -42,7 +42,6 @@ class HitProcessor:
         
     def read_articles(self,
                       source:ArticleSource = ArticleSource.SYSTEM,
-                      remove_sent_id_prefix=True, 
                       sort=False,
                       print_summary=True,
                       parallel=4,
@@ -87,12 +86,10 @@ class HitProcessor:
                 hits_path = sorted_path
                 logger.info("Sorted hits written to tmp file: %s", sorted_path)
 
-            hits_iter = (self._iter_syngrep_hits(hits_path=hits_path,
-                                                 remove_sent_id_prefix=remove_sent_id_prefix,
+            hits_iter = (self._resolve_syngrep_hits_entity_ids(self._iter_syngrep_hits(hits_path=hits_path,
                                                  synfile_map=self.synfile_map,
                                                  synfile_type_map=self.type_map,
-                                                 type_to_ontology=self.type_to_ontology,
-                                                 low_memory=self.low_memory)
+                                                 low_memory=self.low_memory))
                         if source == ArticleSource.SYSTEM else self._iter_gold_hits(hits_path))
             articles_iter = self._iter_articles(hits_iter, source)
             
@@ -276,7 +273,6 @@ class HitProcessor:
     def _iter_syngrep_hits(hits_path: str | Path,
                            synfile_map: dict[str, str],
                            synfile_type_map: dict[str, tuple[HitType, bool]],
-                           remove_sent_id_prefix=True,
                            low_memory=False) -> Iterator[CandidateHit]:
         with MultiSynFileReader(low_memory) as reader, open(hits_path, 'r') as f:
             for line in f:
@@ -307,8 +303,6 @@ class HitProcessor:
                     logger.warning("Found hit that is an abbreviation and an inferred abbreviation!")
                     #TODO: For now just skip, change later
                     continue
-                    #print(self.file_id_to_type)
-                    #raise RuntimeError(f'Found hit that is an abbreviation and an inferred abbreviation!\n{line}')
                 elif is_inferred_abbrev:
                     synonym_type = SynonymType.INFERRED_ABBREVIATION
                 elif is_abbrev:
@@ -316,8 +310,9 @@ class HitProcessor:
                 else:
                     synonym_type = SynonymType.STANDARD
 
-                if remove_sent_id_prefix and ':' in sentence_id:
-                    sentence_id = sentence_id.split(':', 1)[1]
+                if ':' not in sentence_id:
+                    raise ValueError(f'Dubious sentence_id format. Expected article_souce:sent_id, got {sentence_id}')
+                article_source, sentence_id = sentence_id.split(':', 1)
 
                 raw_entity_id = reader.extract_id(str(file_path), line_number)
 
@@ -333,6 +328,7 @@ class HitProcessor:
                     synonym=synonym,
                     prefix=prefix,
                     suffix=suffix,
+                    origin_file_name=article_source,
                 )
 
     def _iter_gold_hits(self, hits_path):

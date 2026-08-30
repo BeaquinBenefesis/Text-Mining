@@ -2,11 +2,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import textmining.resources as res
 from textmining.mirbase import load_mirbase
-from textmining.types import HitType
+from textmining.enums import HitType
 from textmining.ontology import OntologyGraph
 from textmining.normalization import MirNormalizer, DefaultNormalizer
 from textmining.normalization_resources import MirResourceLoader
-from textmining.sentence_utils import SentenceReader
 from textmining.syngrep import SynGrepResult
 
 class ValidatedConfig:
@@ -35,40 +34,6 @@ class MirbaseResources:
     mature_ambi_path: Path = res.MIR_MATURE_AMBI_PATH
 
 @dataclass
-class RuntimeResources:
-    """Constructed, pipeline-owned resources shared across entity configs at
-    normalizer-build time. Normally built automatically from
-    BasePipelineConfig.sentence_path in __post_init__, so entity configs and
-    the sentence reader always agree on which corpus is in play; pass an
-    explicit instance only to override that derived default.
-
-    sentence_reader is opened lazily on first access, so a pipeline that
-    never constructs a normalizer needing it never opens the corpus file.
-    """
-    sentence_path: Path | None = None
-    _sentence_reader: SentenceReader | None = field(default=None, init=False, repr=False)
-
-    @property
-    def sentence_reader(self) -> SentenceReader:
-        if self.sentence_path is None:
-            raise ValueError("RuntimeResources has no sentence_path configured")
-        if self._sentence_reader is None:
-            self._sentence_reader = SentenceReader(self.sentence_path)
-        return self._sentence_reader
-
-    def close(self):
-        if self._sentence_reader is not None:
-            self._sentence_reader.close()
-            self._sentence_reader = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-
-
-@dataclass
 class EntityConfig():
     entity_type: HitType
     synonyms: list[Path]
@@ -88,7 +53,7 @@ class EntityConfig():
                 **source.obo_kwargs
             )
 
-    def get_normalizer(self, resources: RuntimeResources) -> DefaultNormalizer:
+    def get_normalizer(self) -> DefaultNormalizer:
         return DefaultNormalizer()
 
 @dataclass
@@ -105,6 +70,7 @@ class MirConfig(EntityConfig):
     synonyms: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
     no_abbrev: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
     mirbase: MirbaseResources = field(default_factory=MirbaseResources)
+    within_word: list[Path] = field(default_factory=lambda:[res.MIR_SYNS])
 
     def get_graph(self):
         return OntologyGraph.from_dict(
@@ -114,7 +80,7 @@ class MirConfig(EntityConfig):
                           parent_to_child_tsv=self.mirbase.parent_to_child_path)
             )
 
-    def get_normalizer(self, resources: RuntimeResources) -> MirNormalizer:
+    def get_normalizer(self) -> MirNormalizer:
         norm_resources = MirResourceLoader.load(
             mirna_taxons_path=self.mirbase.mirna_taxons_path,
             mirna_2_prefix_path=self.mirbase.mirna_to_prefix_path,
@@ -124,7 +90,7 @@ class MirConfig(EntityConfig):
             precursor_ambiguous_path=self.mirbase.precursor_ambi_path,
             mature_ambiguous_path=self.mirbase.mature_ambi_path,
         )
-        return MirNormalizer(resources.sentence_reader, norm_resources)
+        return MirNormalizer(norm_resources)
 
 @dataclass
 class TaxonConfig(EntityConfig):
@@ -168,13 +134,7 @@ class BasePipelineConfig(ValidatedConfig):
     output_name: str
     output_dir: Path = field(metadata={"skip_validation": True})
     entity_configs: list[EntityConfig]
-    sentence_path: Path = res.SENTENCES_SORTED
-    runtime_resources: RuntimeResources | None = None
-
-    def __post_init__(self) -> None:
-        if self.runtime_resources is None:
-            self.runtime_resources = RuntimeResources(self.sentence_path)
-        super().__post_init__()
+    sentence_pattern: str = str(res.CORPUS_DIR / "*.sent")
 
 @dataclass(kw_only=True)
 class SyngrepInputs:

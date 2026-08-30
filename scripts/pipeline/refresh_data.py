@@ -6,7 +6,7 @@ import urllib.request
 import textmining.resources as res
 from textmining.ontology import OntologyGraph
 from textmining.synonym_utils import write_syn_file
-from textmining.types import HitType
+from textmining.enums import HitType
 
 logger = logging.getLogger(__name__)
 

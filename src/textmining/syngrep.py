@@ -2,7 +2,7 @@ import subprocess
 import logging
 from dataclasses import dataclass
 import os
-from textmining.types import HitType
+from textmining.enums import HitType
 from typing import Optional
 
 logger = logging.getLogger(__name__)

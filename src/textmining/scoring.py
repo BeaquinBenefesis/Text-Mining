@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from textmining.types import HitType
+from textmining.enums import HitType
 from textmining.ontology import OntologyGraph
 from textmining.ontology import to_internal_id
 
@@ -18,5 +18,5 @@ class HitScorer:
         ic = self._type_to_ontology[entity_type].compute_ic(internal_id)
         return HitScore(ic)
 
-def section_weigth():
-    pass
+def section_weigth(section_num):
+    return 1

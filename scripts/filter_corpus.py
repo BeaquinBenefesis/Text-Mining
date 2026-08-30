@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 import re
 from pipelines.pipeline import run_existing_pipeline
-from textmining.types import HitType
+from textmining.enums import HitType
 from textmining.syngrep import run_syngrep, SynGrepResult
 from textmining.resources import MIR_SYNS
 from textmining.paths import SCRIPTS_DIR
@@ -20,11 +20,6 @@ from textmining.normalization import MirIdMapper
 logger = logging.getLogger(__name__)
 
 PREPARE_CORPUS_SH = SCRIPTS_DIR / "corpus" / "prepare_corpus.sh"
-
-# awk expression shared by the two streaming steps below: derive the
-# article_id prefix of a sentence_id (article_id.section_num.sent_num) the
-# same way sentence_utils.parse_sentence_id does, without paying regex cost
-# per line over a 450GB+ corpus.
 _ARTICLE_ID_AWK = 'n=split($1,a,"."); id=a[1]; for (i=2;i<=n-2;i++) id=id"."a[i];'
 SUFFIX_REGEX = re.compile(MirResourceLoader._build_mirna_suffix_pattern())
 
@@ -164,10 +159,6 @@ def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # syngrepJavaOnGrid.sh expands --sentences via an *unquoted* `ls -1 $PATTERN`,
-    # so a single space-joined string with multiple globs gets word-split and
-    # each token glob-expanded independently -- this is how it supports more
-    # than one source directory in one run.
     sentence_pattern_arg = " ".join(args.sentence_pattern)
 
     syngrep_result = None
@@ -194,9 +185,6 @@ def main():
         synfile_map = HitProcessor.parse_synfile_map(syngrep_result.synfile_map_path)
         synfile_type_map = HitProcessor.parse_synfile_type_map(syngrep_result.synfile_type_map_path)
     else:
-        # --existing-hits has no synfile.map/synfile_type.map on disk; hand-build the
-        # equivalent since this script only ever produces MIR-only, single-synfile hits
-        # (see build_mir_only_synfile_maps docstring for why file_id "0" is safe here).
         synfile_map, synfile_type_map = build_mir_only_synfile_maps()
     n_articles = extract_article_ids(hits_path, synfile_map, synfile_type_map, article_ids_path)
     logger.info("%d articles contain at least one miRNA hit", n_articles)

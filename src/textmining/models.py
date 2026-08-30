@@ -3,7 +3,10 @@ from typing import Optional
 from collections import defaultdict
 from textmining.scoring import HitScore
 from textmining.sentence_utils import parse_sentence_id
-from textmining.types import HitType, SynonymType, GroupStatus, NormalizationStatus, NormalizationTargetType
+from textmining.enums import HitType, SynonymType, GroupStatus, NormalizationStatus, NormalizationTargetType
+from textmining.scoring import section_weigth
+from math import log2
+
 
 @dataclass(kw_only=True)
 class CandidateHit:
@@ -16,6 +19,7 @@ class CandidateHit:
     hit_length: int
     prefix: str = None
     suffix: str = None
+    origin_file_name: Optional[str] = None
     synonym: Optional[str] = None
     synonym_id: Optional[str] = None
     mention_type: Optional[str] = None  # This is used for gold standard hits from NCBI
@@ -73,23 +77,56 @@ class NormalizationResult:
 
 
 @dataclass
-class Association:
-    pass
-
-
-@dataclass
 class CoOccurence:
     article_id: str
     sentence_id: str
     section_num: str
     entity_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
-    entity_scores: tuple[HitScore, HitScore]
     
     @property
     def score(self):
-        pass
+        return 1 * section_weigth(self.section_num)
 
+
+@dataclass
+class AssociationEvidence:
+    _current_article_id: Optional[str] = None
+    _current_article_sum: float = 0.0
+    _corpus_sum: float = 0.0
+    
+    def record_cooccurrence(self, cooccurrence: CoOccurence):
+        if self._current_article_id and self._current_article_id > cooccurrence.article_id:
+            raise ValueError(f'Unsorted article order: {self._current_article_id}, {cooccurrence.article_id}')
+        if self._current_article_id != cooccurrence.article_id:
+            self._flush_article_evidence()
+            self._current_article_id = cooccurrence.article_id
+        self._current_article_sum += cooccurrence.score
+        
+    def _flush_article_evidence(self):
+        if self._current_article_id is not None:
+            self._corpus_sum += log2(1 + self._current_article_sum)
+        self._current_article_sum = 0.0
+    
+    @property
+    def score(self):
+        pending = log2(1 + self._current_article_sum)
+        return log2(1 + self._corpus_sum + pending)
+
+
+@dataclass
+class Association:
+    entity_ids: tuple[str, str]
+    entity_types: tuple[HitType, HitType]
+    evidence: AssociationEvidence = field(default_factory=lambda: AssociationEvidence())
+
+    def record_cooccurrence(self, cooccurrence: CoOccurence):
+        self.evidence.record_cooccurrence(cooccurrence)
+    
+    @property
+    def score(self):
+        return self.evidence.score
+        
 @dataclass(kw_only=True)
 class NormalizedHit(CandidateHit):
     normalization: NormalizationResult
@@ -113,6 +150,7 @@ class NormalizedHit(CandidateHit):
             synonym=changes.get('synonym', candidate.synonym),
             prefix=changes.get('prefix', candidate.prefix),
             suffix=changes.get('suffix', candidate.suffix),
+            origin_file_name=changes.get('origin_file_name', candidate.origin_file_name),
             normalization=normalization)
     
     def to_dict(self) -> dict:
@@ -136,9 +174,11 @@ class NormalizedHit(CandidateHit):
         }
         
 class NormalizationContext:
-    def __init__(self):
+    def __init__(self, fetch_article):
         self._buffers = defaultdict(list)
         self._taxon_cache = None
+        self._fetch_article = fetch_article
+        self._article_cache = None
     
     def add_hit(self, hit: CandidateHit):
         self._buffers[hit.entity_type].append(hit)
@@ -154,6 +194,15 @@ class NormalizationContext:
         self._taxon_cache = relevance
         return relevance
     
+    def fetch_sentence(self, sentence_id):
+        if not self._article_cache:
+            self._article_cache = self._fetch_article()
+        sentence = self._article_cache.get(sentence_id)
+        if not sentence:
+            raise ValueError(f'Unknown sentence id for provided article: {sentence_id}')
+        return sentence
+    
     def clear(self):
         self._buffers = defaultdict(list)
         self._taxon_cache = None
+        self._article_cache = None

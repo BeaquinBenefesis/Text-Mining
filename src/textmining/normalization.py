@@ -5,7 +5,6 @@ from typing import Iterable, Optional
 from dataclasses import dataclass
 from textmining.models import CandidateHit, NormalizedHit, NormalizationResult, NormalizationTargetType, NormalizationStatus, NormalizationContext
 from textmining.normalization_resources import MirNormalizationResources
-from textmining.sentence_utils import SentenceReader
 
 logger = logging.getLogger(__name__)
 
@@ -26,29 +25,27 @@ class DefaultNormalizer(EntityNormalizer):
         return [NormalizedHit.from_candidate(hit, norm_result)]
 
 class MirNormalizer(EntityNormalizer):
-    _SUFFIX_CLEANER = re.compile(r"[^a-zA-Z0-9-]+")
+    _SUFFIX_CLEANER = re.compile(r"[^a-zA-Z0-9*-]+")
     
     def __init__(self,
-                 sentence_reader: SentenceReader,
                  resources: MirNormalizationResources):
         super().__init__()  
-        self.sentence_reader = sentence_reader
         self.resources = resources
         logger.info("Initialized MirNormalizer")
         
     def normalize(self, hit: CandidateHit, normalization_context: NormalizationContext) -> Iterable['NormalizedHit']:
         buffer_out = []
         normalized_prefix = self._normalize_mirna_prefix(hit.prefix.lower())
-        suffix_groups = self._normalize_mirna_suffix(hit.suffix.lower())
+        combined_suffix = self._normalize_mirna_suffix(hit.suffix.lower())
         mirna_body = MirIdMapper.resolve_token(hit.entity_id)
         sentence_id = hit.sentence_id
-        
+
         if mirna_body is None:
             logger.error("Unresolved miRNA entity id=%s at sentence=%s", hit.entity_id, sentence_id)
             raise ValueError(f'Unresolved miRNA entity id: {hit.entity_id}')
 
         # NO SUFFIX = FILTER
-        if not suffix_groups and mirna_body != 'bantam':
+        if not combined_suffix and mirna_body != 'bantam':
             logger.debug(
                 "Filtering hit with no suffix: entity_id=%s, sentence=%s, raw_text=%r",
                 hit.entity_id, sentence_id, hit.raw_text,
@@ -56,21 +53,14 @@ class MirNormalizer(EntityNormalizer):
             normalized_hit = NormalizedHit.from_candidate(hit,  NormalizationResult(NormalizationStatus.FILTERED))
             buffer_out.append(normalized_hit)
             return buffer_out
-        
-        combined_suffix = None
-        if suffix_groups:
-            normalized_suffix, mature_part = suffix_groups
-            combined_suffix = normalized_suffix + mature_part
-            combined_suffix = MirNormalizer._SUFFIX_CLEANER.sub('-', combined_suffix)
-                
+
         norm_candidates: list[MirNormalizationCandidate] = []
         if not normalized_prefix:
             logger.debug("No prefix for entity_id=%s; attempting inference (sentence=%s)", hit.entity_id, sentence_id)
-            taxon_relevance = normalization_context.get_taxon_relevance()
             norm_candidates.extend(self._resolve_missing_prefix(sentence_id=sentence_id,
                                                                 mirna_body=mirna_body,
                                                                 mirna_suffix=combined_suffix,
-                                                                relevant_taxons=taxon_relevance.keys())
+                                                                normalization_context=normalization_context)
             )
         else:
             norm_result = self._map_to_accession(prefix=normalized_prefix,
@@ -92,15 +82,21 @@ class MirNormalizer(EntityNormalizer):
         return buffer_out
     
     # If prefix is missing, try to infer it, unless the hit is a family hit
-    def _resolve_missing_prefix(self, sentence_id, mirna_body, mirna_suffix, relevant_taxons) -> Iterable[MirNormalizationCandidate]:
-        mirna_with_suffix = MirNormalizer._join_parts(mirna_body, mirna_suffix)
-        implied_prefixes = self._get_implied_prefixes(relevant_taxons)
+    def _resolve_missing_prefix(self, sentence_id, mirna_body, mirna_suffix, normalization_context: NormalizationContext) -> Iterable[MirNormalizationCandidate]:
+        mirna_with_suffix = mirna_body + (mirna_suffix or '')
+        implied_prefixes = self._get_implied_prefixes(normalization_context.get_taxon_relevance().keys())
         mirbase_prefixes = self.resources.mirna_2_prefix.get(mirna_with_suffix, None)
         family_accession = self.resources.family_normalizer.get(mirna_with_suffix, None)
-        
-        if family_accession and (not mirbase_prefixes or self._is_family_sentence(sentence_id)):
-            norm_result = NormalizationResult(status=NormalizationStatus.FALLBACK, 
-                                              normalized_id=family_accession, 
+
+        no_prefix_overlap = not mirbase_prefixes or not (mirbase_prefixes & implied_prefixes)
+        if family_accession and (no_prefix_overlap or self._is_family_sentence(sentence_id=sentence_id,
+                                                                                  normalization_context=normalization_context)):
+            logger.debug(
+                "Falling back to family accession=%s for mirna=%s: mirbase_prefixes=%s, implied_prefixes=%s, no_prefix_overlap=%s, sentence=%s",
+                family_accession, mirna_with_suffix, mirbase_prefixes, implied_prefixes, no_prefix_overlap, sentence_id,
+            )
+            norm_result = NormalizationResult(status=NormalizationStatus.FALLBACK,
+                                              normalized_id=family_accession,
                                               target_type=NormalizationTargetType.MIR_FAMILY)
             return [MirNormalizationCandidate(normalization=norm_result)]
         elif not mirbase_prefixes:
@@ -139,7 +135,7 @@ class MirNormalizer(EntityNormalizer):
         status = None
         target_type = None
         is_dead = False
-        combined_mirna = MirNormalizer._join_parts(prefix, mirna_body, suffix)
+        combined_mirna = MirNormalizer._join_parts(prefix, mirna_body + (suffix or ''))
         if combined_mirna in self.resources.ambiguous_precursors or combined_mirna in self.resources.ambiguous_mature:
             status = NormalizationStatus.IN_BLACKLIST
         else:
@@ -162,8 +158,8 @@ class MirNormalizer(EntityNormalizer):
         return NormalizationResult(status, accession, target_type, is_dead)
     
     # Very simple heuristic for checking if a mirna hit is a family mirna hit
-    def _is_family_sentence(self, sentence_id):
-        return 'famil' in self.sentence_reader.fetch_text(sentence_id).lower()
+    def _is_family_sentence(self, sentence_id, normalization_context: NormalizationContext):
+        return 'famil' in normalization_context.fetch_sentence(sentence_id=sentence_id).lower()
                     
     def _normalize_mirna_prefix(self, prefix):
         matched_prefix = self.resources.prefix_regex.search(prefix)
@@ -172,12 +168,22 @@ class MirNormalizer(EntityNormalizer):
         else:
             return None
 
-    def _normalize_mirna_suffix(self, suffix):
+    # Preserves whether the raw text actually had a delimiter (e.g. "hsa-mir-21")
+    # or fused the body directly into the digits (e.g. "zma-mir408a", the plant
+    # naming convention) - miRBase's own IDs differ the same way, so the
+    # delimiter can't just be normalized away without breaking dict lookups.
+    def _normalize_mirna_suffix(self, suffix) -> Optional[str]:
         match = self.resources.suffix_regex.search(suffix)
-        if match:
-            return match.group(1) if match.group(1) else '', match.group(2) if match.group(2) else ''
-        else:
+        if not match:
             return None
+        leading = match.group(1) or ''
+        had_delimiter = bool(re.match(r'^[-_x]', leading))
+        body = re.sub(r'^[-_x]', '', leading)
+        combined = body + (match.group(2) or '')
+        combined = MirNormalizer._SUFFIX_CLEANER.sub('-', combined).rstrip('-')
+        if not combined:
+            return None
+        return ('-' + combined) if had_delimiter else combined
     
     @staticmethod
     def _join_parts(*parts: Optional[str]) -> str:
@@ -190,7 +196,8 @@ class MirIdMapper:
             'MIR_REGEX_3': 'lin',
             'MIR_REGEX_4': 'bantam',
             'MIR_REGEX_5': 'lsy',
-            'MIR_REGEX_6': 'iab'
+            'MIR_REGEX_6': 'iab',
+            'MIR_REGEX_7': 'mir-iab'
         }
 
     @staticmethod

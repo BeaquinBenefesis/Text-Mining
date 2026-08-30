@@ -2,9 +2,9 @@ import csv
 from pathlib import Path
 from typing import Iterable, Iterator
 from textmining.article_utils import ArticleRecord
-from textmining.models import NormalizedHit, NormalizationResult
+from textmining.models import NormalizedHit, NormalizationResult, Association
 from textmining.scoring import HitScore
-from textmining.types import HitType, SynonymType, NormalizationStatus, NormalizationTargetType
+from textmining.enums import HitType, SynonymType, NormalizationStatus, NormalizationTargetType
 
 def write_normalized_hits_tsv(articles: Iterable[ArticleRecord], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,3 +65,26 @@ def read_normalized_hits_tsv(input_path: Path) -> Iterator[NormalizedHit]:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             yield _row_to_normalized_hit(row)
+
+def write_associations_tsv(associations: Iterable[Association], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "entity_id_a",
+        "entity_id_b",
+        "entity_type_a",
+        "entity_type_b",
+        "score",
+    ]
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for assoc in associations:
+            writer.writerow({
+                "entity_id_a": assoc.entity_ids[0],
+                "entity_id_b": assoc.entity_ids[1],
+                "entity_type_a": assoc.entity_types[0].name,
+                "entity_type_b": assoc.entity_types[1].name,
+                "score": f"{assoc.score:.4f}",
+            })

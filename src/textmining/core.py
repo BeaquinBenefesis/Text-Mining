@@ -3,10 +3,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 import logging
 from textmining.scoring import HitScorer
-from textmining.article_utils import ArticleSource, ArticleRecord
+from textmining.article_utils import ArticleSource, ArticleRecord, MultiArticleReader
 from textmining.normalization import EntityNormalizer
 from textmining.models import NormalizedHit, CandidateHit, NormalizationContext
-from textmining.types import HitType, NormalizationStatus
+from textmining.enums import HitType, NormalizationStatus
 from textmining.hit_utils import HitProcessor
 
 logger = logging.getLogger(__name__)
@@ -16,13 +16,15 @@ class Processor:
                  hits_processor: HitProcessor,
                  normalizers: dict[HitType, EntityNormalizer],
                  scorer: HitScorer,
+                 article_reader: MultiArticleReader,
                  no_score: set[HitType] = {HitType.MIR}):
-        
-        self.hits_processor = hits_processor       
+
+        self.hits_processor = hits_processor
         self.normalizers = normalizers
         self.scorer = scorer
         self.core_history = ProcessorHistory()
         self.no_score = no_score
+        self.article_reader = article_reader
         logger.info("Core processor initialized")
    
     def _normalize_article(self, article: ArticleRecord, normalization_context: NormalizationContext) -> list[NormalizedHit]:
@@ -44,22 +46,30 @@ class Processor:
     def get_normalized_article_stream(self,
                                       sort_hits=True,
                                       print_summary = True) -> Iterator[ArticleRecord]:
-        for article in self.hits_processor.read_articles(source=ArticleSource.SYSTEM,
-                                                         remove_sent_id_prefix=True,
-                                                         sort=sort_hits,
-                                                         print_summary=print_summary):
-            context = Processor._build_normalization_context(article.resolved_hits)
-            article.normalized_hits = self._normalize_article(article, context)
-            self.core_history.record_article()
-            yield article
+        with self.article_reader:
+            for article in self.hits_processor.read_articles(source=ArticleSource.SYSTEM,
+                                                             sort=sort_hits,
+                                                             print_summary=print_summary):
+                context = self._build_normalization_context(article)
+                article.normalized_hits = self._normalize_article(article, context)
+                self.core_history.record_article()
+                yield article
         if print_summary:
             self.core_history.print_summary()
-            
-    
-    @staticmethod
-    def _build_normalization_context(resolved_hits: list[CandidateHit]) -> NormalizationContext:
-        context = NormalizationContext()
-        for hit in resolved_hits:
+
+    def _build_normalization_context(self, article: ArticleRecord) -> NormalizationContext:
+        # article.hits (not resolved_hits) is guaranteed non-empty (HitProcessor.create_article
+        # raises on an empty buffer); resolved_hits can be empty if every group failed
+        # disambiguation, so origin_file_name is read off the raw hits instead.
+        origin_file_name = article.hits[0].origin_file_name
+        article_id = article.metadata.article_id
+
+        # Deferred: fetch_article is only called the first time some normalizer actually
+        # asks for sentence text (e.g. MirNormalizer's family-sentence check), and the
+        # result is cached by NormalizationContext for the rest of this article.
+        fetch = lambda: self.article_reader.fetch_article(origin_file_name, article_id)
+        context = NormalizationContext(fetch_article=fetch)
+        for hit in article.resolved_hits:
             context.add_hit(hit)
         return context
             

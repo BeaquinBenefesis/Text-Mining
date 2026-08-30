@@ -1,5 +1,5 @@
 from textmining.syngrep import run_syngrep
-from textmining.types import HitType
+from textmining.enums import HitType
 from textmining.resources import MIR_SYNS
 from textmining.paths import OUTPUTS_DIR
 from pipelines.pipeline import run_existing_pipeline
