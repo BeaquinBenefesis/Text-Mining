@@ -1,7 +1,11 @@
 import mmap
+import time
+import logging
 from typing import Iterator
 from pathlib import Path
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 def write_syn_file(output: str | Path,
                    synonym_groups: Iterator[tuple[str, list[str]]]):
@@ -32,6 +36,7 @@ class SynFileReader:
             # Mode 1: Load everything into a list in RAM
             with open(self.file_path, 'r', encoding='utf-8') as f:
                 self.id_list = [line.split(':')[0] for line in f]
+            logger.debug('Loaded %d ids into memory for %s', len(self.id_list), self.file_path)
         else:
             # Mode 2: Low memory disk-seeking using fast OS-level mmap
             self.file = open(self.file_path, 'rb')
@@ -48,7 +53,7 @@ class SynFileReader:
 
     def _index_file_fast(self):
         """Uses mmap to find line endings at C-speed instead of Python loops."""
-        print(f'Indexing: {self.file_path}')
+        start = time.time()
         self.index = [0]
         pos = self.mm.find(b'\n')
         while pos != -1:
@@ -57,6 +62,7 @@ class SynFileReader:
         # Remove trailing offset if file ends with a newline
         if self.index[-1] >= self.mm.size():
             self.index.pop()
+        logger.info('Indexed %d lines for %s in %.2fs', len(self.index), self.file_path, time.time() - start)
 
     def extract_id(self, line_num: int) -> str:
         # Fast path: In-Memory
@@ -91,6 +97,7 @@ class MultiSynFileReader:
     def _get_reader(self, path: str) -> SynFileReader:
         reader = self._readers.get(path)
         if reader is None:
+            logger.debug('Opening SynFileReader for %s', path)
             reader = SynFileReader(path, self.low_memory)
             reader.__enter__()
             self._readers[path] = reader

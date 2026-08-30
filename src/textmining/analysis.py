@@ -1,7 +1,7 @@
 from typing import Iterator
 from itertools import groupby, combinations
-from collections import Counter
-from textmining.models import CandidateHit, NormalizedHit, HitType, Association
+from collections import Counter, defaultdict
+from textmining.models import CandidateHit, NormalizedHit, HitType, Association, CoOccurence
 from textmining.normalization import normalized_successfully
 
 class Grouper:
@@ -36,44 +36,28 @@ class Grouper:
             yield (hit_a, hit_b) if hit_a.entity_type == HitType.MIR else (hit_b, hit_a)
     
     @staticmethod
-    def extract_cooccurrences(hits: Iterator[NormalizedHit]) -> Iterator[tuple[str, NormalizedHit, NormalizedHit]]:
+    def extract_cooccurrences(hits: Iterator[NormalizedHit]) -> Iterator[CoOccurence]:
         for sentence_id, sentence_hits in Grouper.group_by_sentence(hits):
             if len(sentence_hits) < 2:
                 continue
-            for (hit_a, hit_b) in Grouper.extract_valid_combinations(sentence_hits):      
-                yield (sentence_id, hit_a, hit_b)        
+            yield from (CoOccurence(article_id=hit_a.article_id,
+                                    sentence_id=sentence_id,
+                                    section_num=hit_a.section_num,
+                                    entity_types=(hit_a.entity_type, hit_b.entity_type),
+                                    entity_ids=(hit_a.entity_id, hit_b.entity_id)) 
+                        for hit_a, hit_b in Grouper.extract_valid_combinations(sentence_hits))
 
-class Analyzer:
+                    
+
+class EvidenceAggregator:
     
     def __init__(self):
-        pass
+        self.associations: dict[tuple[str, str], Association] = {}
     
-    def record_coocurrence(co_oc: tuple[str, NormalizedHit, NormalizedHit]):
-        pass
-
-
-class GrouperHistory:
-
-    def __init__(self):
-        self.counts: Counter = Counter()
-        self.total = 0
-
-    def record(self, association: Association):
-        self.total += 1
-        key = (association.entity_ids, association.entity_types)
-        self.counts[key] += 1
-
-    def record_all(self, associations: Iterator[Association]) -> Iterator[Association]:
-        # pass-through so you can log while still consuming the stream downstream
-        for assoc in associations:
-            self.record(assoc)
-            yield assoc
-
-    def print_most_common(self, top_n: int = 50):
-        print(f"{'--- Top MIR-Entity Associations ---':^50}")
-        print(f"Total associations recorded: {self.total}")
-        print(f"Unique entity pairs:         {len(self.counts)}")
-        for (entity_ids, entity_types), count in self.counts.most_common(top_n):
-            id_mir, id_other = entity_ids
-            type_mir, type_other = entity_types
-            print(f"  {type_mir}:{id_mir}  <->  {type_other}:{id_other}  : {count}")
+    def record_coccurrence(self, cooc: CoOccurence) -> None:
+        assoc = self.associations.setdefault(
+            cooc.entity_ids,
+            Association(entity_ids=cooc.entity_ids,
+                        entity_types=cooc.entity_types,)
+        )
+        assoc.record_cooccurrence(cooc)

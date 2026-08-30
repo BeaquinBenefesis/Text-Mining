@@ -1,0 +1,24 @@
+Scoring
+For each association i have:
+
+raw occurrences
+distinct articles containing it
+their location in the article (section num)
+their distance inside the sentence
+Divide into sentence level/article level/corpus level evidence:
+a) sentence level: token distance? Maybe parse syntax with spacy and use it to see how syntactically close they are withing one sentence? (But i don't know how i would do that). Maybe simplest is to use an exponential decay function from token distance greater than x.
+b) article level: Take sentence level associations and multiply them by section weight (title/abstract/final section must score higher). Sum them. I could apply a logarithm after summation here to make distinct article mentions more significant.
+c) corpus level: Sum over article evidence, probably also apply log
+
+Progress
+- CoOccurence (models.py): holds one sentence-level mention of an entity pair (article_id, sentence_id, section_num, entity_ids, entity_types). score = section_weigth(section_num) for now, token-distance decay (point a) not implemented yet, section_weigth() itself still a stub in scoring.py.
+- AssociationEvidence (models.py): implements b) and c) as a streaming/O(1)-memory accumulator instead of storing all CoOccurences. Assumes co-occurrences for a given article arrive contiguously (article-by-article corpus processing) and asserts on out-of-order article_ids. score property = log2(1 + corpus_sum + log2(1 + current_article_sum)).
+- Association (models.py): entity_ids/entity_types identity + an AssociationEvidence, delegates record_cooccurrence/score.
+- Grouper / EvidenceAggregator (analysis.py): Grouper extracts valid MIR-other pairs per sentence (type check, normalization check, non-overlap check) and builds CoOccurences. EvidenceAggregator keys Associations by entity_ids tuple and feeds each CoOccurence into the matching Association.
+- Wired into src/pipelines/pipeline.py: process_hits taps the normalized-article stream (_tap_associations) to feed the aggregator while writing hits, then writes associations via results_io.write_associations_tsv.
+
+Open items
+- section_weigth() in scoring.py is unimplemented.
+- Sentence-level token-distance decay (point a) not implemented; CoOccurence.score currently only reflects section weight.
+- Whether CoOccurence.score should be normalized to [0,1] depends on section_weigth being capped at 1 (see discussion) - not yet enforced.
+- Pipeline configs run so far are single-entity-type; association extraction needs a config with MIR + at least one other entity type to produce any output.
