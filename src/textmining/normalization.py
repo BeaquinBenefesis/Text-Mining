@@ -35,8 +35,8 @@ class MirNormalizer(EntityNormalizer):
         
     def normalize(self, hit: CandidateHit, normalization_context: NormalizationContext) -> Iterable['NormalizedHit']:
         buffer_out = []
-        normalized_prefix = self._normalize_mirna_prefix(hit.prefix.lower())
-        combined_suffix = self._normalize_mirna_suffix(hit.suffix.lower())
+        normalized_prefix = self.normalize_prefix(hit.prefix.lower())
+        combined_suffix = self.normalize_suffix(hit.suffix.lower())
         mirna_body = MirIdMapper.resolve_token(hit.entity_id)
         sentence_id = hit.sentence_id
 
@@ -71,7 +71,7 @@ class MirNormalizer(EntityNormalizer):
                                                              suffix=combined_suffix))
             
         statuses = [c.normalization.status for c in norm_candidates]
-        logger.debug("Normalized hit entity_id=%s -> %d candidate(s), statuses=%s", hit.entity_id, len(norm_candidates), statuses)
+        #logger.debug("Normalized hit entity_id=%s -> %d candidate(s), statuses=%s", hit.entity_id, len(norm_candidates), statuses)
        
         for norm_candidate in norm_candidates:
             buffer_out.append(NormalizedHit.from_candidate(hit, 
@@ -118,7 +118,7 @@ class MirNormalizer(EntityNormalizer):
         possible_prefixes = implied_prefixes & mirbase_prefixes
         if not possible_prefixes:
             logger.debug(
-                "Prefix intersection empty for mirna_body=%s: implied=%s, mirbase=%s",
+                "Prefix intersection empty for mirna_body=%s: implied=%s, mirbase=%s, UNKNOWN ENTITY",
                 mirna_body, implied_prefixes, mirbase_prefixes,
             )
             norm_result = NormalizationResult(NormalizationStatus.UNKNOWN_ENTITY)
@@ -161,7 +161,7 @@ class MirNormalizer(EntityNormalizer):
     def _is_family_sentence(self, sentence_id, normalization_context: NormalizationContext):
         return 'famil' in normalization_context.fetch_sentence(sentence_id=sentence_id).lower()
                     
-    def _normalize_mirna_prefix(self, prefix):
+    def normalize_prefix(self, prefix):
         matched_prefix = self.resources.prefix_regex.search(prefix)
         if matched_prefix:
             return matched_prefix.group(1)
@@ -172,7 +172,7 @@ class MirNormalizer(EntityNormalizer):
     # or fused the body directly into the digits (e.g. "zma-mir408a", the plant
     # naming convention) - miRBase's own IDs differ the same way, so the
     # delimiter can't just be normalized away without breaking dict lookups.
-    def _normalize_mirna_suffix(self, suffix) -> Optional[str]:
+    def normalize_suffix(self, suffix) -> Optional[str]:
         match = self.resources.suffix_regex.search(suffix)
         if not match:
             return None
@@ -188,6 +188,11 @@ class MirNormalizer(EntityNormalizer):
     @staticmethod
     def _join_parts(*parts: Optional[str]) -> str:
         return '-'.join(p for p in parts if p)
+
+    def has_mirna_shaped_context(self, prefix: Optional[str], suffix: Optional[str]) -> bool:
+        prefix = (prefix or '').lower()
+        suffix = (suffix or '').lower()
+        return bool(self.normalize_prefix(prefix)) or bool(self.normalize_suffix(suffix))
 
 class MirIdMapper:
     _id_to_token = {
@@ -207,5 +212,5 @@ class MirIdMapper:
 
 def normalized_successfully(hit: NormalizedHit) -> bool:
     if not hit.normalization:
-        raise ValueError(f'Tried to group hit that was not normalized! Hit: {hit}')
-    return hit.normalization.status not in (NormalizationStatus.UNKNOWN_ENTITY, NormalizationStatus.FILTERED)
+        return False
+    return hit.normalization.status in (NormalizationStatus.NORMALIZED, NormalizationStatus.FALLBACK)

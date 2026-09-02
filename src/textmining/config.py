@@ -179,6 +179,10 @@ class MirnaPipelineConfig(PipelineConfig):
 @dataclass(kw_only=True)
 class DiseasePipelineConfig(PipelineConfig):
     entity_configs: list[EntityConfig] = field(default_factory=lambda:[DiseaseConfig()])
+
+@dataclass(kw_only=True)
+class MirnaDiseasePipelineConfig(PipelineConfig):
+    entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), TaxonConfig(), DiseaseConfig()])
     
 @dataclass(kw_only=True)
 class MirnaExistingSyngrepPipelineConfig(ExistingSyngrepPipelineConfig):

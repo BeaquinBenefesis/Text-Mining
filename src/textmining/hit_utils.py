@@ -1,6 +1,7 @@
 import subprocess
 import os
 import tempfile
+import shutil
 import glob
 import logging
 from typing import Iterator, Optional
@@ -12,6 +13,8 @@ from textmining.models import HitGroup, CandidateHit
 from textmining.article_utils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
 from textmining.ontology import OntologyGraph
 from textmining.synonym_utils import MultiSynFileReader
+from textmining.analysis import overlapping_pair, contained_pair
+from textmining.normalization import MirNormalizer
 
 
 #_SYNGREP_COL_NAMES = ["sentence_id","synonym_id","matched_text","start_position", "hit_length","synonym","prefix","suffix"]
@@ -19,20 +22,23 @@ from textmining.synonym_utils import MultiSynFileReader
 
 logger = logging.getLogger(__name__)
 
+
 class HitProcessor:
 
-    def __init__(self, 
-                 hits_path: str, 
+    def __init__(self,
+                 hits_path: str,
                  synfile_map: str,
                  synfile_type_map: str,
-                 type_to_ontology: dict[HitType, OntologyGraph], 
-                 low_memory=False):
-        
+                 type_to_ontology: dict[HitType, OntologyGraph],
+                 low_memory=False,
+                 mir_normalizer: Optional[MirNormalizer] = None):
+
         self.hits_path = hits_path
         self.low_memory = low_memory
         self.type_map = HitProcessor.parse_synfile_type_map(synfile_type_map)
         self.synfile_map = HitProcessor.parse_synfile_map(synfile_map)
         self.type_to_ontology = type_to_ontology
+        self.mir_normalizer = mir_normalizer
         self.history = HitProcessorHistory()
         logger.info(
             "Initialized HitProcessor: hits_path=%s, %d synonym files, low_memory=%s",
@@ -47,14 +53,21 @@ class HitProcessor:
                       parallel=4,
                       memory_cap=10) -> Iterator[ArticleRecord]:
         
-        sorted_path = None
+        scratch_dir = None
         try:
             hits_path = self.hits_path
             if sort:
-                sorted_fd, sorted_path = tempfile.mkstemp()
-                os.close(sorted_fd)
+                # Keep both sort's spill files and the sorted output on the same
+                # (large) filesystem as the hits file: /tmp is a small partition
+                # and a multi-GB hits file overflows it (ENOSPC -> 'write error').
+                # One dedicated directory per run, so a hard kill leaves an
+                # identifiable directory rather than anonymous multi-GB strays.
+                scratch_dir = Path(tempfile.mkdtemp(dir=Path(self.hits_path).parent,
+                                                    prefix='.sort_scratch_'))
+                sorted_path = scratch_dir / 'sorted.hits'
                 env = os.environ.copy()
                 env["LC_ALL"] = "C"
+                env["TMPDIR"] = str(scratch_dir)
 
                 # Sort on the same (article_id, section_num, sentence_num, start, length)
                 # fields that CandidateHit.sort_key uses, instead of a lexical/version
@@ -70,9 +83,13 @@ class HitProcessor:
                     r"""else print $0, s, "0", "0" """
                     r"""}'"""
                 )
+                # pipefail: without it only cut's exit status propagates, which
+                # masks (and misattributes) failures in awk or sort.
                 cmd = (
+                    "set -o pipefail; "
                     f"{awk_split} {str(self.hits_path)!r} | "
                     f"sort --parallel={parallel} -S {memory_cap}G -t$'\\t' "
+                    f"-T {str(scratch_dir)!r} "
                     f"-k9,9 -k10,10n -k11,11n -k4,4n -k5,5n | "
                     f"cut -f1-8 > {str(sorted_path)!r}"
                 )
@@ -103,9 +120,9 @@ class HitProcessor:
                     self.history.output_hits, self.history.resolution_rate * 100,
                 )
         finally:
-            if sorted_path and os.path.exists(sorted_path):
-                os.remove(sorted_path)
-                logger.debug("Removed tmp sorted file: %s", sorted_path)
+            if scratch_dir and scratch_dir.exists():
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                logger.debug("Removed sort scratch dir: %s", scratch_dir)
     
     def _iter_articles(self, hits: Iterator[CandidateHit], source) -> Iterator[ArticleRecord]:
         prev_hit = None
@@ -136,6 +153,7 @@ class HitProcessor:
         self.history.record_article()
         if source == ArticleSource.SYSTEM:
             hit_groups = HitProcessor._group_hits_by_span(article_hits)
+            hit_groups = HitProcessor._drop_contained_groups(hit_groups)
             article_metadata = ArticleMetadata(article_id=article_hits[0].article_id)
             article_evidence = HitProcessor._collect_article_evidence(hit_groups=hit_groups)
             resolved_hits = self._resolve_groups(hit_groups=hit_groups, article_evidence=article_evidence)
@@ -154,6 +172,29 @@ class HitProcessor:
         else:
             raise ValueError(f'Uknown article source: {source}')
             
+    # A group can hold candidates of different entity_types at the same span
+    # (e.g. "bantam" the miRNA vs. "bantam" the chicken gene). If one of them is a
+    # MIR hit with a well-formed prefix/suffix, prefer it over same-span
+    # candidates of other types rather than falling through to
+    # AMBIGUOUS_ENTITY_TYPE.
+    def _prefer_contextual_mir(self, hits: list[CandidateHit]) -> list[CandidateHit]:
+        if not self.mir_normalizer:
+            return hits
+        entity_types = {h.entity_type for h in hits}
+        if len(entity_types) <= 1 or HitType.MIR not in entity_types:
+            return hits
+        contextual_mir_hits = [
+            h for h in hits
+            if h.entity_type == HitType.MIR and self.mir_normalizer.has_mirna_shaped_context(h.prefix, h.suffix)
+        ]
+        if not contextual_mir_hits:
+            return hits
+        logger.debug(
+            "Preferring contextual MIR hit(s) over %d same-span non-MIR candidate(s) at %s",
+            len(hits) - len(contextual_mir_hits), hits[0].sort_key,
+        )
+        return contextual_mir_hits
+
     def _resolve_groups(self, hit_groups: list[HitGroup], article_evidence: ArticleEvidence) -> list[CandidateHit]:
         resolved_hits = []
         for g in hit_groups:
@@ -178,7 +219,9 @@ class HitProcessor:
                                  or (h.entity_id in article_evidence.unambiguous_entity_ids)]
             else:
                 filtered_hits = g.hits
-            
+
+            filtered_hits = self._prefer_contextual_mir(filtered_hits)
+
             if not filtered_hits:
                 g.group_status = GroupStatus.FAILURE
                 logger.debug("Group resolution FAILED: no candidates left after filtering")
@@ -246,6 +289,7 @@ class HitProcessor:
         prev_span = None 
         for hit in unprocessed_hits:
             span = hit.sort_key
+            
             if prev_span is not None and span != prev_span:
                 groups.append(current_group)
                 current_group = HitGroup()
@@ -254,6 +298,49 @@ class HitProcessor:
         if current_group.hits:
             groups.append(current_group)
         return groups                                 
+    
+    
+    @staticmethod
+    def _drop_contained_groups(groups: list[HitGroup]):
+        groups_out = []
+        envelope = None
+
+        for group in groups:
+            cand = group.get_first()
+            if envelope is None:
+                envelope = group
+                continue
+
+            env_cand = envelope.get_first()
+            if contained_pair(cand, env_cand):
+                logger.debug(
+                    "Dropping contained hit %s (%r, span %d:%d) inside %s (%r, span %d:%d)",
+                    cand.synonym_id, cand.raw_text, cand.start_position, cand.start_position + cand.hit_length,
+                    env_cand.synonym_id, env_cand.raw_text, env_cand.start_position, env_cand.start_position + env_cand.hit_length,
+                )
+                continue
+            elif contained_pair(env_cand, cand):
+                logger.debug(
+                    "Dropping contained hit %s (%r, span %d:%d) inside %s (%r, span %d:%d)",
+                    env_cand.synonym_id, env_cand.raw_text, env_cand.start_position, env_cand.start_position + env_cand.hit_length,
+                    cand.synonym_id, cand.raw_text, cand.start_position, cand.start_position + cand.hit_length,
+                )
+                envelope = group
+            else:
+                if overlapping_pair(cand, env_cand):
+                    logger.warning(
+                        "Partial (non-containing) span overlap: %s (%r, span %d:%d) vs %s (%r, span %d:%d)",
+                        env_cand.synonym_id, env_cand.raw_text, env_cand.start_position, env_cand.start_position + env_cand.hit_length,
+                        cand.synonym_id, cand.raw_text, cand.start_position, cand.start_position + cand.hit_length,
+                    )
+                groups_out.append(envelope)
+                envelope = group
+
+        if envelope:
+            groups_out.append(envelope)
+
+        return groups_out
+            
     
     def _resolve_syngrep_hits_entity_ids(self, hit_stream: Iterator[CandidateHit]) -> Iterator[CandidateHit]:
         entity_id = None
@@ -282,6 +369,11 @@ class HitProcessor:
                 
                 parts = line.split('\t')
                 parts += [''] * (8 - len(parts))
+                
+                if len(parts) != 8:
+                    logger.critical('Illegal hit format! %s', line)
+                    raise ValueError(f'Illegal hit format!: {parts}')
+                
                 sentence_id, synonym_id, matched_text, start, length, synonym, prefix, suffix = parts
 
                 synonym_parts = synonym_id.split(':', 2)

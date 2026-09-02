@@ -81,12 +81,14 @@ class CoOccurence:
     article_id: str
     sentence_id: str
     section_num: str
-    entity_ids: tuple[str, str]
+    normalized_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
+    entity_positions: tuple[tuple[int, int], tuple[int, int]] # (start, end) end exclusive
+    weight: int = 1
     
     @property
     def score(self):
-        return 1 * section_weigth(self.section_num)
+        return self.weight * section_weigth(self.section_num)
 
 
 @dataclass
@@ -116,7 +118,7 @@ class AssociationEvidence:
 
 @dataclass
 class Association:
-    entity_ids: tuple[str, str]
+    normalized_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
     evidence: AssociationEvidence = field(default_factory=lambda: AssociationEvidence())
 

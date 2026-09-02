@@ -63,7 +63,7 @@ echo "Sorting '$INPUT_FILE' (this can take a while for large files)..." >&2
 # SentenceReader ends up asked for a sentence it already scanned past.
 # Sort keys are prepended (not appended) so they can be stripped back off
 # with sed regardless of any tabs embedded in the sentence text itself.
-awk -F'\t' 'BEGIN{OFS="\t"} {
+LC_ALL=C awk -F'\t' 'BEGIN{OFS="\t"} {
     s=$1
     if (match(s, /^(.+)\.([0-9]+)\.([0-9]+)$/, a))
         print a[1], a[2], a[3], $0
@@ -72,6 +72,7 @@ awk -F'\t' 'BEGIN{OFS="\t"} {
 }' "$INPUT_FILE" \
     | LC_ALL=C sort -t$'\t' -k1,1 -k2,2n -k3,3n \
           -S "$MEM_BUFFER" \
+          -T "$OUTPUT_DIR" \
           --parallel="$NUM_CORES" \
     | sed 's/^[^\t]*\t[^\t]*\t[^\t]*\t//' \
     > "$FINAL_OUTPUT"
@@ -89,7 +90,11 @@ TARGET_BYTES_PER_CHUNK=$(( (FILE_SIZE + NUM_CHUNKS - 1) / NUM_CHUNKS ))
 
 echo "Splitting into $NUM_CHUNKS chunk(s) (~$(( TARGET_BYTES_PER_CHUNK / 1024 / 1024 )) MB each, article-aligned)..." >&2
 
-awk -v outdir="$OUTPUT_DIR" \
+# LC_ALL=C: the corpus contains stray non-UTF8 bytes (truncated multibyte characters
+# from the source articles), which make gawk warn in a UTF-8 locale; it also makes
+# length($0) below a true byte count rather than a character count, so the chunk size
+# accounting matches TARGET_BYTES_PER_CHUNK.
+LC_ALL=C awk -v outdir="$OUTPUT_DIR" \
     -v prefix="$CHUNK_PREFIX" \
     -v target="$TARGET_BYTES_PER_CHUNK" \
     -v max_chunks="$NUM_CHUNKS" \
