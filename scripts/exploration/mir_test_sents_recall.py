@@ -6,11 +6,12 @@ from textmining.syngrep import run_syngrep
 from textmining.enums import HitType
 from textmining import resources as res
 from textmining.paths import OUTPUTS_DIR
-from textmining.config import ExistingSyngrepPipelineConfig, MirnaPipelineConfig
+from textmining.config import MirnaPipelineConfig
 from textmining.sentence_utils import parse_sentence_id
 from textmining.results_io import read_normalized_hits_tsv
 from textmining.normalization import normalized_successfully
 from pipelines.pipeline import run_existing_pipeline, run_pipeline
+import logging
 
 OUTPUT_NAME = 'mir_test_sents'
 OUTPUT_DIR = OUTPUTS_DIR / OUTPUT_NAME
@@ -21,7 +22,8 @@ def main():
         MirnaPipelineConfig(output_name=OUTPUT_NAME,
                             output_dir=OUTPUT_DIR,
                             n_tasks=1,
-                            sentence_pattern=str(res.MIR_TEST_SENTS))
+                            sentence_pattern=str(res.MIR_TEST_SENTS)),
+        debug=logging.DEBUG
     )
 
     sentence_categories: dict[str, str] = {}
