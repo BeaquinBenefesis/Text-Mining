@@ -1,0 +1,794 @@
+================================================================================
+DATABASE DESIGN NOTES — miRNA knowledgebase
+Session date: 2026-08-31; revised 2026-09-03 (section 8); amended 2026-09-03 (section 9)
+Status: design settled, nothing implemented yet. Sections 1, 3 and 6 are SUPERSEDED
+        in part by section 8; section 8.1/8.2/8.5/8.7/8.8 are further amended by
+        section 9 -- read section 9 first, it is the design of record.
+Relates to work packages: "database", "user interface" (thesis_instructions.txt)
+================================================================================
+
+QUESTION ADDRESSED
+------------------
+What kind of database for the miRNA knowledgebase: relational, graph (Neo4j),
+or something else? And how does ontology-aware scoring fit in?
+
+
+================================================================================
+1. DECISION: RELATIONAL (PostgreSQL). NOT NEO4J.
+================================================================================
+
+Reasoning — query shape, not data shape, should decide this.
+
+The knowledgebase is bipartite and SINGLE-HOP: miRNA --[co-occurs, score]--> ontology
+term. `Association` in models.py is a pair plus a scalar. There is no path of unknown
+length to walk. Neo4j earns its cost for variable-depth traversal (MATCH (a)-[*1..5]-(b))
+where hop count isn't known in advance. Here it is known: one.
+
+The actual UI queries are all aggregate-and-filter:
+  - top-N partners for a miRNA ranked by score  -> indexed lookup + ORDER BY / LIMIT
+  - filter by entity type, score threshold, article count, year
+  - retrieve supporting sentences/articles for an association -> FK join
+  - reverse lookup: all miRNAs annotated to a disease
+  - corpus-wide aggregate stats for the evaluation chapter
+
+Every one is a SQL one-liner and a poor fit for Cypher. The confidence score
+(AssociationEvidence) is a weighted sum over evidence = an aggregation workload,
+which is what graph DBs are worst at.
+
+Supporting practical arguments:
+  - Comparable KBs in the domain (HMDD, miRTarBase, DisGeNET) are relational/flat-file.
+  - Ecosystem: pandas read_sql, FastAPI + SQLAlchemy, reviewer familiarity.
+  - Neo4j adds an operational dependency serving no query the project needs.
+
+WHERE A GRAPH MODEL WOULD HAVE A CASE (for completeness / thesis discussion):
+If scope later expanded to INDIRECT INFERENCE — miRNA -> target gene -> pathway ->
+disease, proposing associations never observed in one sentence — traversal becomes
+central. But that is a different scientific claim needing separate validation, it is
+not scoped in thesis_instructions.txt, and even then depth-3 SQL joins are tractable
+at this data volume.
+
+INFRASTRUCTURE CAVEAT — the one open decision:
+Postgres needs a server process. If no server is available on the institute machine,
+SQLite is a legitimate substitute at this scale: same SQL, same schema, closure table
+works identically, ships as a single file (nice as a reproducible thesis artifact).
+Trade-offs given up: weaker full-text search (FTS5 vs native Postgres FTS), and
+concurrent writes — which only matters for the user-feedback loop if several people
+annotate simultaneously. Design against SQLAlchemy and the choice stays reversible.
+
+
+================================================================================
+2. TWO TIERS, NOT ONE DATABASE
+================================================================================
+
+This matters more than the engine choice.
+
+outputs/mirna/mirna.norm is 15 MB on a TEST corpus. On full PubMed the mention layer
+is hundreds of millions of rows. Do not conflate it with what the UI serves.
+
+TIER 1 — MENTION STORE (analytical, append-only, large)
+  One row per normalized hit; essentially the current .norm TSV:
+  sentence_id, entity_id, entity_type, offsets, raw_text, norm_status, synonym_id.
+  Write-once, read-in-bulk, never updated. Consumers: evaluation scripts and the
+  aggregation step. NOT the web UI.
+
+  RECOMMENDATION: DuckDB over Parquet, not loaded into Postgres.
+    - queries existing TSV/Parquet in place, zero ETL:
+        SELECT ... FROM 'outputs/mirna/*.norm'   -- works today
+    - columnar; per-entity-type aggregations over 1e8 rows in seconds
+    - embedded library, no server
+    - analytical layer stays as files under version-controllable paths; reviewers
+      reproduce it without provisioning anything
+
+TIER 2 — KNOWLEDGEBASE (served, small, DERIVED)
+  Associations, scores, evidence links, entities, synonyms, articles, user feedback.
+  Derived from Tier 1 by a rebuild step. Small — bounded by (miRNAs x ontology terms)
+  that actually co-occur, orders of magnitude below mention count.
+
+  KEY PAYOFF: Tier 2 can be rebuilt from scratch whenever the scoring function
+  changes. And it WILL change — section_weigth() is still a stub, token-distance
+  decay is unimplemented. Treating scores as derived rather than authoritative is
+  what keeps that cheap.
+
+
+================================================================================
+3. TIER-2 SCHEMA SKETCH (conceptual, not DDL)
+   [SUPERSEDED by section 8. The rationale in (a)-(d) below still stands and is
+    carried forward; the table shapes are replaced.]
+================================================================================
+
+  entity(entity_id PK, entity_type, primary_name, source_ontology, is_obsolete)
+  entity_synonym(entity_id FK, synonym, synonym_type, is_curated)
+  ontology_closure(ancestor_id, descendant_id, distance)
+
+  article(article_id PK, pmid, year, journal, title, is_resource_paper)
+  evidence_sentence(sentence_id PK, article_id FK, section_num, text)
+
+  association(assoc_id PK, mir_id FK, partner_id FK, partner_type,
+              direct_score, propagated_score,
+              n_articles_direct, n_articles_propagated,
+              score_version)
+  association_evidence(assoc_id FK, sentence_id FK, mir_start, partner_start)
+
+  external_association(source_db, mir_id, partner_id, external_score)  -- HMDD etc.
+  synonym_feedback(entity_id FK, proposed_synonym, status, submitted_at)
+
+Notes on three non-obvious choices:
+
+(a) evidence_sentence holds text ONLY for sentences backing an association.
+    Do not put the corpus in the database. That is a small fraction of the corpus
+    and the only text the UI ever renders. Everything else stays behind the
+    IndexedSentenceReader proposed in SENTENCE_READER_DESIGN.md — that design is
+    right and remains the corpus access layer.
+
+(b) external_association is SEPARATE from association, not merged at load time.
+    Text-mined and curated evidence must stay distinguishable: partly for the
+    confidence score (curated agreement should boost it), but critically because
+    HMDD overlap is the EVALUATION BASELINE. Merging at load contaminates the
+    benchmark. Keep apart, join on demand.
+
+(c) score_version on association — keeps results from multiple scoring
+    configurations side by side, needed when the methods chapter has to justify
+    the final weighting.
+
+(d) direct_score vs propagated_score kept separate — see section 5.
+
+
+================================================================================
+4. ONTOLOGY SIZES (measured 2026-08-31) AND THE CLOSURE TABLE
+================================================================================
+
+Actual counts from /mnt/raidbio2/extproj/.../data/ontologies:
+
+  ncbi_taxonomy.obo            2,854,537 terms    657M
+  mondo_disease_ontology.obo      63,267 terms     51M
+  gene_ontology.obo               48,340 terms     36M
+  cell_ontology_base.obo          18,914 terms     17M
+  brenda_tissue_ontology.obo       6,566 terms    2.1M
+  pathway_ontology.obo             2,739 terms    1.3M
+
+Taxonomy is 3 orders of magnitude larger than everything else. Full taxonomy closure
+would be ~2.85M x mean depth = 50-70M rows. Everything else combined is ~140k terms;
+at mean ancestor count ~20-25 for multi-parent DAGs that is ~3M closure rows, a couple
+hundred MB — trivial for Postgres.
+
+RESOLUTION — taxonomy is excluded from the closure, for a SEMANTIC reason:
+
+  Taxon is not an annotation dimension. NormalizationContext.get_taxon_relevance()
+  uses taxon hits as DISAMBIGUATION CONTEXT for miRNA normalization (which organism,
+  so mir-21 resolves to the right prefix). It is a qualifier on an association, not
+  an association target.
+
+  Propagation up the taxonomic tree yields nothing: miR-21 -- Homo sapiens rolls up
+  to Hominidae, Primates, Mammalia, Eukaryota. Every association in the corpus
+  terminates at "associated with Eukaryota". No annotation content.
+
+  WHAT TO DO INSTEAD: a curated ROLLUP TABLE mapping each observed taxon to its
+  nearest ancestor in a small curated rank set — human, mouse, rat, common model
+  organisms, plant vs. animal (relevant given the plant/animal miRNA naming
+  convention bug already fixed in normalization.py). ~30 rows. Not a closure.
+
+FURTHER PRUNING — closure over OBSERVED terms only:
+  Only terms that actually receive a hit in the corpus need closure entries, plus
+  their ancestors. Realistically 10-20k MONDO terms, not 63k.
+  OntologyGraph.ancestor_closure() (ontology.py:266) already computes exactly the
+  induced subgraph over a set of observed indices plus ancestors. Build the closure
+  table from that, not from the whole OBO.
+
+  Also: follow only is_a. Already the case — relationship='is_a', _rel_subgraph.
+
+
+================================================================================
+5. EVIDENCE PROPAGATION UP THE DAG  (main technical result of the session)
+================================================================================
+
+5.1 TWO DIFFERENT THINGS, DO NOT CONFLATE
+-----------------------------------------
+(a) QUERY EXPANSION — retrieval-side, at QUERY TIME, does not touch the score.
+    User searches "carcinoma"; UI joins closure to also surface subtype
+    associations. Nearly free. Implement regardless — it is what makes the UI
+    filter behave sensibly.
+
+(b) EVIDENCE PROPAGATION — scoring-side, PRECOMPUTED, changes the score.
+    Aggregates subtype evidence into an ancestor-level association, so a miRNA
+    hitting 30 different carcinoma subtypes gets a real `carcinoma` association
+    even if no sentence ever says "carcinoma".
+    THIS is what belongs in analysis.py.
+
+Both are wanted. Only (b) is precomputed.
+
+
+5.2 THE CONSTRAINT: PROPAGATE *BEFORE* THE PER-ARTICLE LOG
+----------------------------------------------------------
+AssociationEvidence currently does:
+
+    per article:  article_sum = SUM section_weight(section)
+    on flush:     corpus_sum += log2(1 + article_sum)
+    final:        log2(1 + corpus_sum)
+
+The per-article log2 is a SATURATION function — it stops one paper saying
+"miR-21 / breast cancer" fifty times from dominating. That damping is lost if
+propagation happens at the wrong layer.
+
+FAILURE MODE IF DONE POST-HOC (summing final descendant scores into the ancestor):
+  An article mentioning `breast carcinoma`, `lung carcinoma` and `carcinoma`
+  contributes three separately-log-compressed terms to the carcinoma score.
+  Compression applied per-subtype, then summed linearly => broad terms inflate in
+  proportion to how many subtypes happen to co-occur. Systematic bias toward the
+  LEAST informative terms. Would show up in evaluation as high-level MONDO terms
+  topping every ranking. This is a real methodological flaw, not a tuning issue.
+
+CORRECT PLACEMENT: propagate at the CO-OCCURRENCE level, so all propagated
+contributions for one article land in the same _current_article_sum bucket and are
+compressed together.
+
+Minimal change to the existing streaming design:
+  - CoOccurence gains `weight: float = 1.0`;
+    score becomes `weight * section_weigth(section_num)`
+  - Grouper.extract_cooccurrences yields, for each direct (mir, term) pair,
+    additional CoOccurences for (mir, ancestor) with a decayed weight.
+
+Everything downstream (EvidenceAggregator, article flush, corpus log) is unchanged,
+and double-counting is correctly damped because it happens inside one article bucket.
+
+EFFICIENCY NOTE: expanding per SENTENCE multiplies the co-occurrence stream ~20x.
+Cheaper to expand once per ARTICLE, at the flush point already present in
+_flush_article_evidence: accumulate the article's direct (mir, term) -> weight map
+first, then expand to ancestors once. Same result (sums within an article are
+commutative), less work when a term recurs across sentences, dedups naturally.
+
+
+5.3 DECAY FUNCTION: IC RATIO, NOT HOP DISTANCE
+----------------------------------------------
+Do NOT use exp(-distance). Hop count is not comparable across ontology branches;
+MONDO granularity is very uneven, so 3 hops in one subtree is a much larger
+specificity drop than 3 hops in another.
+
+Use:
+    decay(term -> ancestor) = IC(ancestor) / IC(term)
+
+_descendant_count_cache (ontology.py:304) is exactly what IC derives from, and this
+connects to work already done in analysis/analyze_mir_ic.ipynb.
+
+Three reasons this is better:
+  1. Calibrated to actual specificity loss, not tree topology.
+  2. In [0,1] by construction, composes cleanly with section weights.
+  3. The ROOT gets IC=0 hence weight 0 — vacuous associations like
+     "miR-21 -- disease" fall out to zero automatically, with NO arbitrary depth
+     cutoff to justify in the methods chapter. Much cleaner to defend.
+
+
+5.4 SCHEMA CONSEQUENCE
+----------------------
+Keep direct and propagated evidence separable (see section 3 schema):
+  direct_score, propagated_score, n_articles_direct, n_articles_propagated
+
+A reviewer will ask whether an association is directly attested in text or only
+inferred by rollup. The direct-only scores are also needed as an ABLATION when
+benchmarking against HMDD. Storing only the combined score throws that away and
+would require re-running the pipeline to recover.
+
+
+================================================================================
+6. SUMMARY OF DECISIONS (as of 2026-08-31; amended by section 8)
+================================================================================
+  - Tier 2 KB: PostgreSQL (SQLite acceptable fallback if no server).
+  - Tier 1 mentions: DuckDB over Parquet/TSV, queried in place, no ETL.
+  - Closure table for MONDO, GO-BP, CL, BTO, PW — built over OBSERVED terms via
+    OntologyGraph.ancestor_closure(), not full OBO files.
+  - Taxonomy: small curated rollup table, NO closure, NO propagation.
+  - Propagation precomputed in analysis.py at article-flush time, IC-ratio decay,
+    injected BEFORE the per-article log.
+  - Query-time closure joins serve retrieval expansion only.
+  - Corpus text stays on disk behind IndexedSentenceReader; only evidence
+    sentences go in the DB.
+
+
+================================================================================
+7. OPEN QUESTIONS -- STATUS AS OF 2026-09-03
+================================================================================
+  1. miRNA<->miRNA edges in scope?
+     ANSWERED: NO. Strictly bipartite miRNA <-> ontology term. `association` uses a
+     designated mirna_entity_id column with UNIQUE(mirna_entity_id, term_entity_id),
+     which matches Grouper.valid_types (analysis.py:32) exactly. No symmetric key
+     discipline needed. Revisit only if the indirect-inference scope in section 1
+     is ever taken up.
+
+  2. How much of the mention layer must the UI expose?
+     STILL OPEN, but de-risked: the mention layer now lives in atlas_evidence.db
+     (section 8), which the web app can ATTACH read-only. Failed-normalization hits
+     for the synonym-feedback loop are therefore reachable without a second
+     technology. Remaining question is only whether to ship that file at all.
+
+  3. Postgres availability.
+     MOOT. SQLite is the decision, not a fallback -- ATTACH, read-only shipping and
+     single-file reproducibility are now load-bearing (section 8.1). SQLAlchemy is
+     dropped with it; the portability it was buying has been deliberately spent.
+
+  4. section_weigth() stub / token-distance decay.
+     STILL OPEN. Unchanged prerequisite for score quality, but no longer a blocker
+     for building the database: build_meta records which scoring config produced a
+     file, and both tiers are drop-and-recreate.
+
+  5. NEW: article metadata has no source. See section 8.6.
+
+
+================================================================================
+8. REVISED DESIGN -- 2026-09-03 (DESIGN OF RECORD)
+================================================================================
+
+Supersedes the Tier-1/Tier-2 split of section 2 and the schema sketch of section 3.
+The rationale in sections 4 and 5 (closure over observed terms, taxonomy excluded,
+IC-ratio propagation before the per-article log) is unchanged and still governs.
+
+MEASURED SCALE that motivates this (full-corpus run, outputs/mirna_and_disease):
+  .hits   9.6 GB
+  .norm  12.0 GB
+  .cooc   2.7 GB   31,410,695 co-occurrence rows
+  .assoc   67 MB    1,482,996 association rows
+The four-order-of-magnitude gap between co-occurrences and associations is the
+whole argument for splitting the files.
+
+
+8.1 TWO SQLITE FILES, JOINED VIA ATTACH  [DEFERRED -- see section 9]
+---------------------------------------
+  atlas_core.db      -- small, served, ships as the thesis artifact.
+  atlas_evidence.db  -- large, deferred, built from the hit shards on disk only
+                        when mention-level drill-down is wanted.
+
+Both opened read-only (`file:...?mode=ro&immutable=1`; immutable is a promise, safe
+because each file is built once and never updated). No cross-file foreign keys --
+SQLite cannot express them across ATTACH. Integrity is enforced by a validation
+script after build (8.5).
+
+Engine: raw SQL DDL in versioned .sql files + stdlib sqlite3. NOT SQLAlchemy.
+Reason: ATTACH, immutable=1 and read-only file shipping are SQLite-specific and
+load-bearing, so the portability SQLAlchemy was protecting has already been given
+up; keeping the ORM would only obscure the DDL. Use STRICT tables (SQLite 3.53.2
+on this machine) to recover the type checking the ORM would have given.
+
+Bulk loading goes through duckdb's sqlite extension, not through Python:
+    INSTALL sqlite; LOAD sqlite;
+    ATTACH 'atlas_core.db' AS core (TYPE SQLITE);
+    INSERT INTO core.association SELECT ... FROM read_csv('*.assoc', ...);
+Verified working here. This keeps 31M evidence rows out of the Python heap.
+Python's remaining jobs: DDL, entity-id minting, validation.
+
+
+8.2 BUILD IDENTITY -- THE PRICE OF DROPPING FOREIGN KEYS
+--------------------------------------------------------
+atlas_evidence.db stores integer entity ids MINTED BY THE CORE BUILD. Rebuild core
+with one extra ontology term and those ids can shift; attaching a stale evidence
+file then produces joins that succeed and return nonsense. That is strictly worse
+than a missing FK, which at least fails loudly.
+
+  build_meta(build_id, schema_version, built_at, source_run, score_config)
+
+One row, in BOTH files. The connect helper REFUSES to attach a pair whose build_id
+differs. This is the one check that must run at open time, not merely in the
+validator.
+
+build_meta also replaces the per-row `score_version` column proposed in section 3(c):
+one scoring configuration per file, since both tiers are drop-and-recreate.
+
+
+8.3 CORE TIER
+-------------
+Entity -- UNIFIED for miRNAs and ontology terms. Deliberate single-table
+inheritance: type-specific columns (organism, reference_level) are NULL for MONDO
+terms, source_ontology is NULL for miRNAs. Accepted, because it makes `association`
+have a single FK target and lets the UI stay generic over entity types. Splitting
+out an entity_mirna side table would be cleaner in the abstract and buys nothing
+for six columns.
+
+  entity(id INTEGER PK,              -- surrogate; the join key everywhere
+         accession TEXT UNIQUE,      -- MIMAT0000062, MONDO_0007254
+         entity_type,                -- HitType
+         name,
+         source,                     -- mirbase / mondo / go / cl / bto / pw
+         is_obsolete, replaced_by,
+         reference_level,            -- mature | precursor | family; miRNA only
+         organism,                   -- miRNA only
+         ic_structural,              -- descendant-count IC, ontology.py:304
+         ic_corpus,                  -- corpus-frequency IC
+         n_articles_corpus)          -- the count ic_corpus derives from
+
+  Integer surrogate ids, not accession strings, as the key: 1.48M association rows
+  index on two of them.
+
+  TWO IC COLUMNS, not one. They measure different things and the plan already
+  commits to comparing them as an evaluation-chapter result -- one column cannot.
+  CORRECTNESS CONSTRAINT on ic_corpus: article counts MUST be propagated up the
+  closure before the log (a hit on `breast carcinoma` counts toward `carcinoma`).
+  Raw direct frequency is not IC; terms with zero direct mentions but many
+  mentioned descendants would otherwise be undefined.
+
+  synonym(entity_id, surface_form, synonym_type)     -- input to syngrep
+  ontology_closure(ancestor_id, descendant_id, min_distance)
+
+  min_distance, NOT distance: in a multi-parent DAG several paths exist and the
+  distance is not unique. Minimum is the convention. Kept for display and
+  debugging only -- propagation decay uses the IC ratio (section 5.3), not hops.
+
+  article(id INTEGER PK, pmid, pmcid, year, journal, corpus_source, citation_count)
+  -- year/journal/citation_count currently have no data source; see 8.6.
+
+  association(id INTEGER PK,
+              mirna_entity_id, term_entity_id, term_type,
+              n_sentences,
+              n_articles_direct, n_articles_propagated,
+              first_year,
+              score_direct, score_propagated, score_norm,
+              UNIQUE(mirna_entity_id, term_entity_id))
+
+  Score components as columns so rescoring is an UPDATE.
+
+  DIRECT vs PROPAGATED IS KEPT (section 5.4), and is a different axis from
+  raw vs normalised. score_raw/score_norm alone would discard: (i) the direct-only
+  ablation needed for the HMDD benchmark, and (ii) the answer to "is this
+  association attested in a sentence, or only inferred by rollup?", which a
+  reviewer will ask. Recovering either would mean re-running the pipeline.
+
+  term_type is denormalised from entity.entity_type -- justified, it is in the hot
+  filter path, but it is a duplicated fact and the validator must check agreement.
+
+  external_association(source, mirna_entity_id, term_entity_id, source_evidence)
+  -- HMDD etc. Separate from association, never merged at load (section 3b).
+
+  mention_timeline(mirna_entity_id, year, n_articles)
+  association_timeline(assoc_id, year, n_articles)
+  -- Count ARTICLES, not mentions. Blocked on 8.6; define the tables, ship empty.
+
+  Indexes: association(mirna_entity_id), association(term_entity_id),
+           association(score_norm), entity(accession), ontology_closure(ancestor_id).
+
+  SIZING WARNING: 1.48M direct associations is comfortably "small". Ancestor
+  propagation multiplies it ~10-20x (15-30M rows) and the core file stops being
+  something to ship as a resource. Plan a prune-at-load threshold: drop propagated
+  associations below a score floor, and drop ancestors below an ic_structural
+  floor. The root already falls out at zero weight by construction (section 5.3).
+
+
+8.4 EVIDENCE TIER
+-----------------
+  sentence(id INTEGER PK, article_id, section_num, sentence_num)   -- NO text column
+  normalized_hit(id INTEGER PK, sentence_id, entity_id,
+                 start_position, hit_length, raw_text,
+                 norm_status, target_type, dead)
+  association_evidence(assoc_id, mirna_hit_id, term_hit_id)
+
+TEXT IS NOT STORED. 31.4M co-occurrences span order 1e7 distinct sentences; their
+text is tens of GB, and it would be the single largest thing in the design.
+ArticleReader (article_utils.py:58) already mmaps the .sent files behind a
+byte-offset index -- that IS the sentence store. Resolve text at render time
+through it. This keeps section 3(a)'s conclusion rather than reversing it.
+
+NORMALIZATION STATUS IS THREE COLUMNS, NOT ONE FUSED ENUM. The code has three
+orthogonal fields and they must be stored as they are:
+  norm_status   -- NormalizationStatus: NORMALIZED | FALLBACK | UNKNOWN_ENTITY
+                                        | FILTERED | IN_BLACKLIST
+  target_type   -- NormalizationTargetType: MIR_FAMILY | MIR_PRECURSOR | MIR_MATURE
+  dead          -- bool
+A single fused enum (MAPPED_TO_MATURE / AMBIGUOUS_TYPE / NOT_IN_MIRBASE / FAILURE
+/ DEAD) loses information and would drift from enums.py.
+
+association_evidence referencing HIT rows rather than sentence rows is right:
+spans, status and section come along for free, and the synonym-feedback loop needs
+to reach hits that FAILED normalization -- which are rows here, not associations.
+
+
+8.5 VALIDATION SCRIPT (replaces the foreign keys)
+-------------------------------------------------
+Runs after every build, over the ATTACHed pair. Must check at minimum:
+  - build_id agreement between the two files
+  - no orphan entity_id in association, external_association, normalized_hit
+  - no orphan assoc_id / hit_id in association_evidence
+  - association.term_type agrees with entity.entity_type (denormalisation check)
+  - UNIQUE(mirna_entity_id, term_entity_id) actually holds
+  - closure is acyclic, has no self-pairs, min_distance >= 1
+  - score columns in range; score_direct <= score_norm where both present
+  - row counts reconcile against the .assoc / .cooc source files
+A build whose validation fails is not published. Cheap, and it is the only thing
+standing where the FKs used to.
+
+
+8.6 BLOCKER: ARTICLE METADATA HAS NO SOURCE
+-------------------------------------------
+The corpus is `sentence_id \t text` and nothing else. ArticleMetadata
+(article_utils.py:20) carries only article_id. Therefore article.year, .journal,
+.citation_count and BOTH timeline tables have no input today.
+
+Filling them needs a bulk PubMed metadata fetch over ~650k PMIDs
+(scripts/pubtator.py is the nearest existing hook). That is its own work item.
+
+DECISION: ship v1 with article(pmid) only. Define year/journal/timeline structures
+in the DDL and leave them empty. Do not let metadata acquisition delay the first
+.db file -- the timeline features are additive, the association table is not.
+
+
+8.7 WHERE THE CODE LIVES
+------------------------
+Follows the layout the repo already uses: library in src/textmining/, orchestration
+in src/pipelines/, thin runners in scripts/.
+
+  src/textmining/db/
+      schema/core.sql            DDL, versioned and reviewable
+      schema/evidence.sql
+      connect.py                 read-only URIs, ATTACH, build_id guard (8.2)
+      ids.py                     accession -> integer id minting
+      loaders/entity.py          mirbase + OntologyGraph -> entity, synonym
+      loaders/closure.py         ancestor_closure() -> ontology_closure
+      loaders/association.py     .assoc -> association, via duckdb
+      loaders/evidence.py        .cooc + .norm -> normalized_hit,
+                                 association_evidence
+      validate.py                the checks in 8.5
+  src/pipelines/build_db.py      sequences the loaders; mirrors pipeline.py
+  scripts/db/build_core.py       runner: paths and config only
+  scripts/db/build_evidence.py
+  scripts/db/validate_db.py
+
+  paths.py gains DB_DIR = PROJECT_ROOT / "db".
+
+ON GRANULARITY: one loader MODULE per table, but NOT one script per table. The
+loaders are order-dependent -- entity must be fully loaded and ids minted before
+association can resolve accessions, and closure needs the observed-term set. So:
+one function per table (takes a connection, writes one table), and one build script
+per tier that sequences them inside a single transaction. Three scripts total.
+Loading a table in isolation is a debugging convenience, not the interface.
+
+
+8.8 AMENDED SUMMARY OF DECISIONS  [file count amended by section 9 -- rest stands]
+--------------------------------
+  - Two SQLite files (atlas_core.db, atlas_evidence.db), ATTACH, both read-only.
+  - Raw SQL DDL + sqlite3 + STRICT tables. SQLAlchemy dropped, Postgres moot.
+  - duckdb sqlite extension for bulk load; Python only for DDL, ids, validation.
+  - build_meta in both files; mismatched build_id refuses to attach.
+  - Unified entity table, integer surrogate ids, accession as a unique column.
+  - Two IC columns (structural + corpus); corpus IC propagated up the closure.
+  - direct/propagated score split RETAINED; per-row score_version dropped.
+  - Evidence tier stores no sentence text -- ArticleReader's mmap index is the
+    sentence store.
+  - Three normalization columns (status, target_type, dead), not one fused enum.
+  - Bipartite only; UNIQUE(mirna_entity_id, term_entity_id).
+  - Validation script replaces foreign keys; a failing build is not published.
+  - Article metadata and timelines deferred (8.6), structures defined and empty.
+  - Sections 4 and 5 unchanged: closure over observed terms only, taxonomy
+    excluded in favour of a ~30-row curated rollup, IC-ratio propagation injected
+    before the per-article log.
+
+
+================================================================================
+9. AMENDMENT -- 2026-09-03(b): SINGLE FILE FIRST (CURRENT DESIGN OF RECORD)
+================================================================================
+
+Same day as section 8, later discussion. Amends 8.1, 8.2, 8.5, 8.7 and the file
+count in 8.8. Everything else in section 8 (entity/association/closure shapes,
+the IC columns, the direct/propagated score split, no-sentence-text, the three
+normalization columns) is UNCHANGED -- this amendment is about file count only.
+
+TRIGGER: re-examining why the sentence text argument was raised as a reason to
+reconsider the split, and finding it was never actually the reason for the split
+in the first place. Section 8.4 already commits to NOT storing sentence text
+regardless of file count -- ArticleReader's mmap index is the sentence store
+either way. So "I read sentences from disk either way" is true, but it doesn't
+bear on the one-file-vs-two question at all; raising it just prompted a look at
+what the split was actually buying, and whether that was needed yet.
+
+What the split actually bought: a small atlas_core.db shippable as a standalone
+thesis artifact, decoupled from the ~31M-row evidence tables. That is a real
+tradeoff, but it is an optimisation for a requirement that is not yet confirmed
+(a downloadable resource file is a documentation/deliverable question for the
+supervisor, not an engineering one) and not yet costed (Stage 3e, which is the
+first point evidence-tier row counts get measured, has not been reached).
+
+
+9.1 DECISION
+------------
+Build ONE file, e.g. atlas.db, containing every table from 8.3 AND 8.4 together
+(entity, synonym, ontology_closure, article, association, external_association,
+timelines, sentence, normalized_hit, association_evidence). Section 3a-3d of the
+implementation plan (core only) and 3e (evidence tier) become phases of loading
+the SAME file, not separate files.
+
+REASONS, in order of weight:
+
+  1. You do not need to decide the file-count question now. The evidence tier
+     (3e) was already deferred behind a working core; one file is what "core
+     first" produces by default when there is no second file to defer INTO.
+     The two-file question can only be answered with real evidence-tier row
+     counts, which do not exist until 3e is attempted.
+
+  2. SQLite enforces foreign keys directly, in one file. `PRAGMA foreign_keys =
+     ON` turns every `REFERENCES` clause into a real constraint checked at
+     INSERT time. This is strictly better than section 8.5's validation script,
+     which only exists because ATTACH cannot express a foreign key across
+     files. One file recovers a real integrity mechanism instead of a
+     post-hoc check that runs after the damage is already written.
+
+  3. It is a reversible decision, not a one-way door. If normalized_hit /
+     association_evidence later prove too large to ship in the same file as
+     the small tables, splitting them out is a mechanical migration -- copy
+     two tables into a second file, repoint the loader, drop them from the
+     first -- not a schema redesign. This is exactly why 8.7's schema.sql
+     should stay organised by tier internally (see 9.3) even though it is one
+     file: the split, if it comes, should cost an afternoon, not a rewrite.
+
+  4. Load order becomes a hard, enforced constraint rather than a convention.
+     entity must be fully populated before association (FK to entity), which
+     must exist before association_evidence (FK to both association and
+     normalized_hit). With PRAGMA foreign_keys=ON this order is not optional
+     -- SQLite rejects an out-of-order insert outright, which is the correct
+     failure mode. The loader sequencing described in 8.7 is unchanged; it is
+     now enforced by the database instead of only by discipline.
+
+
+9.2 WHAT THIS REMOVES FROM SECTION 8
+-------------------------------------
+  - ATTACH between files: gone, not needed within one file.
+  - build_meta's cross-file role (8.2): gone. Keep ONE build_meta row per file
+    for provenance (build_id, schema_version, built_at, source_run,
+    score_config) -- still useful for "which run produced this .db", just no
+    longer load-bearing for a build_id MATCH check, since there is only one
+    file to match against itself.
+  - The validation script's job (8.5) shrinks to what FK constraints cannot
+    express: term_type agreeing with entity.entity_type (denormalisation,
+    9.3), UNIQUE(mirna_entity_id, term_entity_id) holding, closure acyclicity,
+    score ranges, row counts reconciled against source files. Orphan-id checks
+    (the majority of the old list) are now redundant with PRAGMA
+    foreign_keys=ON and can be dropped from the script.
+  - `immutable=1` / read-only-by-default framing (8.1): still correct practice
+    for a build-then-serve file, just no longer solving a cross-file integrity
+    problem -- it is solving "don't let a stray notebook INSERT corrupt the
+    shipped file" (see analysis/sqlite_tutorial.ipynb section 6), which
+    applies identically to one file or two.
+
+
+9.3 REVISED CODE LAYOUT (amends 8.7)
+-------------------------------------
+  src/textmining/db/
+      schema.sql                  ONE file. Organise with section comments
+                                   matching 8.3 (core) then 8.4 (evidence), so
+                                   a future split is "cut here", not "figure
+                                   out which tables go where".
+      connect.py                  read-only URI open, PRAGMA foreign_keys=ON.
+                                   No ATTACH, no build_id guard -- see 9.2.
+      ids.py                      accession -> integer id minting
+      loaders/entity.py           mirbase + OntologyGraph -> entity, synonym
+      loaders/closure.py          ancestor_closure() -> ontology_closure
+      loaders/association.py      .assoc -> association, via duckdb
+      loaders/evidence.py         .cooc + .norm -> normalized_hit,
+                                  association_evidence
+      validate.py                 the shrunk checklist in 9.2
+  src/pipelines/build_db.py       sequences the loaders in FK order; mirrors
+                                  pipeline.py
+  scripts/db/build_db.py          ONE runner script (was build_core.py +
+                                  build_evidence.py)
+  scripts/db/validate_db.py
+
+  paths.py gains DB_DIR = PROJECT_ROOT / "db".
+
+Loader granularity is unchanged from 8.7: one function per table, sequenced by
+one build script inside a single transaction, not one script per table.
+
+
+9.4 IF THE SPLIT COMES BACK
+-----------------------------
+Ask the supervisor whether a standalone downloadable resource file is actually
+wanted for the thesis deliverable. If yes, or if 3e's real row counts make one
+file impractical to ship, section 8 (two files, ATTACH, build_id guard,
+validation-replaces-FK) is the design to revive -- it was not wrong, it was
+early. Revisit then, with real numbers instead of a projection from the
+full-corpus .cooc count.
+
+
+================================================================================
+10. AMENDMENT -- 2026-09: STAGE 3 BUILT, SEVERAL 8/9 DECISIONS REVERSED
+================================================================================
+
+10.1 SENTENCE TEXT IS STORED AFTER ALL -- reverses 8.4 / 9's "no text, resolve
+via ArticleReader" stance.
+
+Byte-offset caching (the alternative considered) is fragile: any corpus
+mutation after build time makes a cached offset return the wrong sentence
+silently. That risk was already implicit in every stored hit position, just
+not visible until byte offsets made it concrete.
+
+The volume argument against text no longer holds at the real scope. §8.4's
+"tens of GB" estimate was for text behind all 31.4M co-occurrences, TAXON
+included, undeduplicated. The real requirement is distinct sentences backing
+DISEASE associations only (TAXON is context, never an association target --
+unchanged from 8.3): measured 1,985,435 distinct sentences behind 20,259,783
+DISEASE co-occurrence rows, ~156 bytes/sentence average -> ~300-400MB. Storing
+text removes ArticleReader as a query-time dependency entirely -- no
+byte_start/byte_length columns, no mmap lookups at render time.
+
+  sentence(id INTEGER PK, article_id, section_num, sentence_num, sentence_text)
+
+10.2 normalized_hit DROPPED. association_evidence carries positions inline.
+
+With the synonym-feedback use case (reaching failed-normalization hits) no
+longer a near-term priority, the only remaining job of a generic hits table
+was supplying spans to association_evidence -- so that indirection is gone:
+
+  association_evidence(id, association_id, sentence_id,
+                        mirna_start, mirna_end, term_start, term_end)
+
+norm_status is not a column: every row here passed normalized_successfully()
+upstream (Grouper.extract_valid_combinations), so it is constant
+(NORMALIZED|FALLBACK) by construction -- storing it would be storing a
+constant. dead was considered and kept out for the same reason it turned out
+not to apply here as cleanly hoped: worth revisiting only if a concrete need
+for it on evidence rows shows up.
+
+10.3 ENTITIES_PER_SENTENCE_CAP = 20 (analysis.py), counted by DISTINCT SPANS.
+
+Some corpus "sentences" are mis-segmented tables (a review's table dumped as
+one line) that blow up combinations() -- one measured case had 2,583 distinct
+miRNA mentions x ~80 repeated disease positions = 206,640 co-occurrence rows
+from a single sentence. Grouper.extract_cooccurrences now skips any sentence
+whose hit count exceeds the cap before calling extract_valid_combinations.
+
+Critically, the cap counts DISTINCT (start, length) SPANS, not raw hit rows.
+Reason: MirNormalizer resolves a species-ambiguous bare mention (no prefix,
+multiple surviving taxon candidates) into one NormalizedHit PER candidate
+species at the SAME span -- measured 17.8% of all MIR mention spans in the
+full corpus affected. Counting raw rows would flag ordinary multi-organism
+prose (common in miRNA literature) as false-positive "tables." A family-level
+fallback was considered and rejected: only ~23% of precursor rows (~7% of
+distinct bodies) have any family mapping, so it wouldn't have generalized.
+Sampled real sentences (30 per bucket, in outputs/sentence_hit_examples/)
+confirm the cutoff: 6-20 spans is uniformly genuine prose; 21-50 is a mix
+tipping toward tables; 51-100 was 100% table/list artifacts in-sample.
+
+10.4 corpus.py LOADS article + sentence + association_evidence IN ONE PASS.
+
+Not three separate loaders. Reason: EvidenceAggregator (models.py) folds each
+CoOccurence's score into a running per-article sum and discards the object
+immediately -- by the time an Association has a final score, no individual
+co-occurrence (sentence, positions) survives to build evidence rows from.
+association_evidence therefore cannot be built from a downstream DB query
+(association has no sentence-level columns, deliberately -- 8.3) or from
+post-aggregation objects. It has to consume the .cooc file directly, which
+already persists exactly what's needed per co-occurrence (this is what
+write_cooccurrences_tsv was already doing, before Stage 3 needed it for this
+reason). CoOccurence gained one field to make this work: origin_file_name
+(which corpus .sent file an article lives in -- needed for MultiArticleReader,
+was on NormalizedHit already but wasn't threaded through to CoOccurence).
+
+Consequence: any .cooc file written before this change (missing
+origin_file_name, predating the entities-per-sentence cap) is stale and must
+be regenerated before the evidence tier can be built from it.
+
+10.5 article METADATA -- real source found, §8.6 gap partly closed.
+
+/mnt/raidbio2/extdata/textmining/master/{pubmed_metadata.csv,pmc_metadata.csv}
+(PMID/PMCID, DOI, Title, Journal, PubDate, PubType, Authors, AuthorsCount).
+Well-formed RFC4180 CSV (comma-containing fields are quoted) -- a naive split
+breaks on it, a real CSV parser doesn't. One gotcha: pmc_metadata.csv has a
+field (a large-consortium paper's Authors list) over Python's default 128KB
+csv field limit; needs csv.field_size_limit(sys.maxsize) or it crashes.
+
+  article(id, external_id, year, journal)
+
+Both year and journal are nullable, measured against the real files, not
+assumed: PubDate is empty for 12.6% of pubmed_metadata.csv rows and 16.4% of
+pmc_metadata.csv rows (of the rest, format is YYYY-MM-DD, with a small
+PMC-side fraction as YYYY-MM/YYYY -- still year-extractable). journal is
+non-empty in pubmed_metadata.csv but empty for a small fraction of
+pmc_metadata.csv rows. title/DOI/PubType/Authors/AuthorsCount not carried --
+no named feature needs them yet.
+
+mention_timeline / association_timeline (8.3) are still NOT built -- the
+article.year gap that blocked them is closed, but they remain derived
+aggregate tables (COUNT DISTINCT article per (entity_or_assoc, year), joined
+through association_evidence -> sentence -> article) to be computed after a
+build, not loaded from an external source. Own work item.
+
+10.6 build_db.py is the one runner (9.3's scripts/db/build_db.py, actually
+written): opens the DB, loads the ontology graphs, then inside one `with
+MultiArticleReader(...) as reader, con:` block runs entity -> synonym ->
+association -> corpus (article/sentence/association_evidence together, 10.4)
+-> ontology_closure -> article_metadata, in that order. association before
+ontology_closure and corpus because both derive from it (ontology_closure's
+observed-term set is `SELECT DISTINCT term_entity_id FROM association`;
+corpus resolves each co-occurrence's association_id against it).
+================================================================================
