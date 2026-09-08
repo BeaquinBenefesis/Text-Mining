@@ -48,109 +48,52 @@ class HitProcessor:
         
     def read_articles(self,
                       source:ArticleSource = ArticleSource.SYSTEM,
-                      sort=False,
-                      print_summary=True,
-                      parallel=4,
-                      memory_cap=10) -> Iterator[ArticleRecord]:
+                      print_summary=True,) -> Iterator[ArticleRecord]:
         
-        scratch_dir = None
-        try:
-            hits_path = self.hits_path
-            if sort:
-                # Keep both sort's spill files and the sorted output on the same
-                # (large) filesystem as the hits file: /tmp is a small partition
-                # and a multi-GB hits file overflows it (ENOSPC -> 'write error').
-                # One dedicated directory per run, so a hard kill leaves an
-                # identifiable directory rather than anonymous multi-GB strays.
-                scratch_dir = Path(tempfile.mkdtemp(dir=Path(self.hits_path).parent,
-                                                    prefix='.sort_scratch_'))
-                sorted_path = scratch_dir / 'sorted.hits'
-                env = os.environ.copy()
-                env["LC_ALL"] = "C"
-                env["TMPDIR"] = str(scratch_dir)
+        hits_iter = (self._resolve_syngrep_hits_entity_ids(self._iter_syngrep_hits(hits_path=self.hits_path,
+                                                synfile_map=self.synfile_map,
+                                                synfile_type_map=self.type_map,
+                                                low_memory=self.low_memory))
+                    if source == ArticleSource.SYSTEM else self._iter_gold_hits(self.hits_path))
+        articles_iter = self._iter_articles(hits_iter, source)
+        
+        yield from articles_iter
 
-                # Sort on the same (article_id, section_num, sentence_num, start, length)
-                # fields that CandidateHit.sort_key uses, instead of a lexical/version
-                # sort over the raw sentence_id string, so the two orderings cannot
-                # disagree (see REVIEW.md §2.13). The awk step mirrors
-                # sentence_utils.parse_sentence_id's regex to split column 1 into three
-                # extra numeric-sortable columns, which are dropped again by cut.
-                awk_split = (
-                    r"""awk -F'\t' 'BEGIN{OFS="\t"} {"""
-                    r"""s=$1; sub(/^[^:]*:/, "", s); """
-                    r"""if (match(s, /^(.+)\.([0-9]+)\.([0-9]+)$/, a)) """
-                    r"""print $0, a[1], a[2], a[3]; """
-                    r"""else print $0, s, "0", "0" """
-                    r"""}'"""
-                )
-                # pipefail: without it only cut's exit status propagates, which
-                # masks (and misattributes) failures in awk or sort.
-                cmd = (
-                    "set -o pipefail; "
-                    f"{awk_split} {str(self.hits_path)!r} | "
-                    f"sort --parallel={parallel} -S {memory_cap}G -t$'\\t' "
-                    f"-T {str(scratch_dir)!r} "
-                    f"-k9,9 -k10,10n -k11,11n -k4,4n -k5,5n | "
-                    f"cut -f1-8 > {str(sorted_path)!r}"
-                )
-                logger.info("Sorting hits: %s", cmd)
-                try:
-                    subprocess.run(cmd, shell=True, check=True, capture_output=True,
-                                    text=True, env=env, executable='/bin/bash')
-                except subprocess.CalledProcessError as e:
-                    logger.critical("External sort failed (rc=%d): %s", e.returncode, e.stderr)
-                    raise
-                hits_path = sorted_path
-                logger.info("Sorted hits written to tmp file: %s", sorted_path)
-
-            hits_iter = (self._resolve_syngrep_hits_entity_ids(self._iter_syngrep_hits(hits_path=hits_path,
-                                                 synfile_map=self.synfile_map,
-                                                 synfile_type_map=self.type_map,
-                                                 low_memory=self.low_memory))
-                        if source == ArticleSource.SYSTEM else self._iter_gold_hits(hits_path))
-            articles_iter = self._iter_articles(hits_iter, source)
-            
-            yield from articles_iter
-
-            if print_summary:
-                self.history.print_summary()
-                logger.info(
-                    'HitProcessor run complete: articles=%d, input_hits=%d, output_hits=%d, resolution_rate=%.2f%%',
-                    self.history.articles_processed, self.history.input_hits,
-                    self.history.output_hits, self.history.resolution_rate * 100,
-                )
-        finally:
-            if scratch_dir and scratch_dir.exists():
-                shutil.rmtree(scratch_dir, ignore_errors=True)
-                logger.debug("Removed sort scratch dir: %s", scratch_dir)
+        if print_summary:
+            self.history.print_summary()
+            logger.info(
+                'HitProcessor run complete: articles=%d, input_hits=%d, output_hits=%d, resolution_rate=%.2f%%',
+                self.history.articles_processed, self.history.input_hits,
+                self.history.output_hits, self.history.resolution_rate * 100,
+            )
     
     def _iter_articles(self, hits: Iterator[CandidateHit], source) -> Iterator[ArticleRecord]:
-        prev_hit = None
         prev_article = None
         hit_buffer = []
+        seen_articles = set()
         for hit in hits:
             self.history.record_input_hit(hit)
-            if prev_hit and not prev_hit.sort_key <= hit.sort_key:
-                logger.critical(
-                    "Hits not sorted: prev=%s (sort_key=%s), current=%s (sort_key=%s)",
-                    prev_hit.synonym_id, prev_hit.sort_key, hit.synonym_id, hit.sort_key,
-                )
-                raise ValueError(f"Hits are not sorted. Can not resolve ambiguous hits! "
-                                f"Previous hit: { prev_hit.sort_key}, current hit: {hit.sort_key}")
             current_article = hit.article_id
-            if prev_article and current_article != prev_article:
+            if prev_article is not None and current_article != prev_article:
+                if current_article in seen_articles:
+                    logger.critical('Article contiguity broken: %s reappears after %s', current_article, prev_article)
+                    raise ValueError(f'Invalid hits input. Article contiguity broken: {current_article} reappears!')
+                # Record the article being *closed*, not the one being opened: the
+                # open one is still current and must not count as already seen.
+                seen_articles.add(prev_article)
                 yield self.create_article(hit_buffer, source)
                 hit_buffer = []
             hit_buffer.append(hit)
             prev_article = current_article
-            prev_hit = hit
         if hit_buffer:
             yield self.create_article(hit_buffer, source)
     
     def create_article(self, article_hits: list[CandidateHit], source) -> ArticleRecord:
         if not article_hits:
+            logger.critical('Empty hit buffer passed to create ArticleRecord')
             raise ValueError('Empty hit buffer passed to create ArticleRecord')
         self.history.record_article()
+        article_hits.sort(key=lambda h: h.sort_key)
         if source == ArticleSource.SYSTEM:
             hit_groups = HitProcessor._group_hits_by_span(article_hits)
             hit_groups = HitProcessor._drop_contained_groups(hit_groups)
@@ -329,9 +272,9 @@ class HitProcessor:
             else:
                 if overlapping_pair(cand, env_cand):
                     logger.warning(
-                        "Partial (non-containing) span overlap: %s (%r, span %d:%d) vs %s (%r, span %d:%d)",
+                        "Partial (non-containing) span overlap: %s (%r, span %d:%d) vs %s (%r, span %d:%d) in sentence: %s",
                         env_cand.synonym_id, env_cand.raw_text, env_cand.start_position, env_cand.start_position + env_cand.hit_length,
-                        cand.synonym_id, cand.raw_text, cand.start_position, cand.start_position + cand.hit_length,
+                        cand.synonym_id, cand.raw_text, cand.start_position, cand.start_position + cand.hit_length, cand.sentence_id,
                     )
                 groups_out.append(envelope)
                 envelope = group

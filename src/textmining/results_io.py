@@ -1,11 +1,11 @@
 import csv
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, NamedTuple, Optional
 
 import duckdb
 
 from textmining.article_utils import ArticleRecord
-from textmining.models import NormalizedHit, NormalizationResult, Association
+from textmining.models import NormalizedHit, NormalizationResult, Association, CoOccurence
 from textmining.scoring import HitScore
 from textmining.enums import HitType, SynonymType, NormalizationStatus, NormalizationTargetType
 
@@ -28,7 +28,7 @@ NORM_FIELDNAMES = [
     "score",
 ]
 
-# Matches NormalizedHit.sort_key; _tap_order enforces this exact total order.
+# Matches NormalizedHit.sort_key;
 _NORM_ORDER_BY = """
     split_part(sentence_id, '.', 1),
     CAST(split_part(sentence_id, '.', 2) AS INT),
@@ -38,7 +38,7 @@ _NORM_ORDER_BY = """
 """
 
 
-def write_normalized_hits_tsv(articles: Iterable[ArticleRecord], output_path: Path) -> None:
+def write_normalized_hits_tsv(normalized_hits: Iterable[NormalizedHit], output_path: Path) -> Iterable[NormalizedHit]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = NORM_FIELDNAMES
@@ -46,9 +46,77 @@ def write_normalized_hits_tsv(articles: Iterable[ArticleRecord], output_path: Pa
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
-        for article in articles:
-            for hit in article.normalized_hits:
-                writer.writerow(hit.to_dict())
+        for hit in normalized_hits:
+            writer.writerow(hit.to_dict())
+            yield hit
+
+
+COOC_FIELDNAMES = [
+    "article_id",
+    "sentence_id",
+    "section_num",
+    "origin_file_name",
+    "normalized_id_a",
+    "normalized_id_b",
+    "entity_type_a",
+    "entity_type_b",
+    "start_a",
+    "end_a",
+    "start_b",
+    "end_b",
+    "weight",
+]
+
+
+def write_cooccurrences_tsv(cooccurrences: Iterable[CoOccurence], output_path: Path) -> Iterator[CoOccurence]:
+    """Pass-through writer: consumes lazily and re-yields, like write_normalized_hits_tsv."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=COOC_FIELDNAMES, delimiter="\t")
+        writer.writeheader()
+        for cooc in cooccurrences:
+            (start_a, end_a), (start_b, end_b) = cooc.entity_positions
+            writer.writerow({
+                "article_id": cooc.article_id,
+                "sentence_id": cooc.sentence_id,
+                "section_num": cooc.section_num,
+                "origin_file_name": cooc.origin_file_name,
+                "normalized_id_a": cooc.normalized_ids[0],
+                "normalized_id_b": cooc.normalized_ids[1],
+                "entity_type_a": cooc.entity_types[0].name,
+                "entity_type_b": cooc.entity_types[1].name,
+                "start_a": start_a,
+                "end_a": end_a,
+                "start_b": start_b,
+                "end_b": end_b,
+                "weight": cooc.weight,
+            })
+            yield cooc
+
+
+def read_cooccurrences_tsv(input_path: Path) -> Iterator[CoOccurence]:
+    """Reads a .cooc file back into CoOccurence objects. article_epoch is not
+    persisted (it's a live-run-only bookkeeping value for ArticleStreamGuard,
+    meaningless once reloaded), so it's stamped as 0 here -- callers reading
+    this back are past the aggregation stage and never use it."""
+    with input_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            yield CoOccurence(
+                article_id=row["article_id"],
+                sentence_id=row["sentence_id"],
+                section_num=row["section_num"],
+                origin_file_name=_as_str(row["origin_file_name"]),
+                article_epoch=0,
+                normalized_ids=(row["normalized_id_a"], row["normalized_id_b"]),
+                entity_types=(HitType[row["entity_type_a"]], HitType[row["entity_type_b"]]),
+                entity_positions=(
+                    (_as_int(row["start_a"]), _as_int(row["end_a"])),
+                    (_as_int(row["start_b"]), _as_int(row["end_b"])),
+                ),
+                weight=_as_int(row["weight"]),
+            )
 
 
 def _as_str(value) -> Optional[str]:
@@ -142,3 +210,24 @@ def write_associations_tsv(associations: Iterable[Association], output_path: Pat
                 "entity_type_b": assoc.entity_types[1].name,
                 "score": f"{assoc.score:.4f}",
             })
+
+
+class ReadAssociation(NamedTuple):
+    """Duck-typed stand-in for Association, not the real thing -- Association.score
+    is a computed property over AssociationEvidence's private log-sum state, which
+    a single stored float can't reconstruct. load_associations only ever reads
+    .normalized_ids/.entity_types/.score, so this is a drop-in for that purpose."""
+    normalized_ids: tuple[str, str]
+    entity_types: tuple[HitType, HitType]
+    score: float
+
+
+def read_associations_tsv(input_path: Path) -> Iterator[ReadAssociation]:
+    with input_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for row in reader:
+            yield ReadAssociation(
+                normalized_ids=(row["normalized_id_a"], row["normalized_id_b"]),
+                entity_types=(HitType[row["entity_type_a"]], HitType[row["entity_type_b"]]),
+                score=float(row["score"]),
+            )

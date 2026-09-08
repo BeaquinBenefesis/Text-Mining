@@ -344,6 +344,9 @@ class OntologyGraph:
             external_id = to_external_id(data['id'])
         return external_id
     
+    def iter_nodes(self) -> Iterator:
+        return (self._rel_subgraph[idx] for idx in self._rel_subgraph.node_indices())
+    
     # Root ids in internal format
     def extract_synonyms(self,
                          root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str], list[str]]]:

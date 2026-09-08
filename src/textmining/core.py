@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import logging
 from textmining.scoring import HitScorer
 from textmining.article_utils import ArticleSource, ArticleRecord, MultiArticleReader
-from textmining.normalization import EntityNormalizer
+from textmining.normalization import EntityNormalizer, normalized_successfully
 from textmining.models import NormalizedHit, CandidateHit, NormalizationContext
 from textmining.enums import HitType, NormalizationStatus
 from textmining.hit_utils import HitProcessor
@@ -35,20 +35,16 @@ class Processor:
             normalized_hits.extend(normalizer.normalize(candidate_hit, normalization_context))
         for normalized_hit in normalized_hits:
             self.core_history.record_output_hit(normalized_hit)
-            norm_status = normalized_hit.normalization.status
             is_dead = normalized_hit.normalization.dead
-            valid_norm_status  = norm_status == NormalizationStatus.NORMALIZED or norm_status == NormalizationStatus.FALLBACK
             entity_type = normalized_hit.entity_type
-            if not is_dead and valid_norm_status and entity_type not in self.no_score:
+            if not is_dead and normalized_successfully(normalized_hit) and entity_type not in self.no_score:
                 normalized_hit.score = self.scorer.compute_score(normalized_hit.entity_type, normalized_hit.normalization.normalized_id)
         return normalized_hits
                  
     def get_normalized_article_stream(self,
-                                      sort_hits=True,
                                       print_summary = True) -> Iterator[ArticleRecord]:
         with self.article_reader:
             for article in self.hits_processor.read_articles(source=ArticleSource.SYSTEM,
-                                                             sort=sort_hits,
                                                              print_summary=print_summary):
                 context = self._build_normalization_context(article)
                 article.normalized_hits = self._normalize_article(article, context)

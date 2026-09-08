@@ -81,6 +81,12 @@ class CoOccurence:
     article_id: str
     sentence_id: str
     section_num: str
+    origin_file_name: Optional[str]
+    # Position of this article in the stream, stamped by ArticleStreamGuard. Article
+    # ids are no longer globally ordered (the hits file is a concatenation of per-chunk
+    # blocks), so this monotone counter is what lets AssociationEvidence detect a
+    # reordered stream in O(1) instead of keeping a seen-set per association.
+    article_epoch: int
     normalized_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
     entity_positions: tuple[tuple[int, int], tuple[int, int]] # (start, end) end exclusive
@@ -93,20 +99,30 @@ class CoOccurence:
 
 @dataclass
 class AssociationEvidence:
-    _current_article_id: Optional[str] = None
+    """
+    Per-article saturating evidence
+    """
+
+    _current_article_epoch: int = -1
+    _current_article_id: Optional[str] = None   # kept for diagnostics only
     _current_article_sum: float = 0.0
     _corpus_sum: float = 0.0
-    
+
     def record_cooccurrence(self, cooccurrence: CoOccurence):
-        if self._current_article_id and self._current_article_id > cooccurrence.article_id:
-            raise ValueError(f'Unsorted article order: {self._current_article_id}, {cooccurrence.article_id}')
-        if self._current_article_id != cooccurrence.article_id:
+        if cooccurrence.article_epoch < self._current_article_epoch:
+            raise ValueError(
+                f'Reordered article stream: epoch {cooccurrence.article_epoch} '
+                f'({cooccurrence.article_id}) follows epoch {self._current_article_epoch} '
+                f'({self._current_article_id})'
+            )
+        if cooccurrence.article_epoch != self._current_article_epoch:
             self._flush_article_evidence()
+            self._current_article_epoch = cooccurrence.article_epoch
             self._current_article_id = cooccurrence.article_id
         self._current_article_sum += cooccurrence.score
-        
+
     def _flush_article_evidence(self):
-        if self._current_article_id is not None:
+        if self._current_article_epoch >= 0:
             self._corpus_sum += log2(1 + self._current_article_sum)
         self._current_article_sum = 0.0
     

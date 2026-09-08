@@ -6,15 +6,15 @@ from textmining.core import Processor
 from textmining.hit_utils import HitProcessor
 from textmining.article_utils import MultiArticleReader
 from textmining.progress import track_progress
-from textmining.results_io import write_normalized_hits_tsv, write_associations_tsv, read_normalized_hits, read_normalized_hits_tsv
+from textmining.results_io import write_cooccurrences_tsv, write_normalized_hits_tsv, write_associations_tsv, read_normalized_hits, read_normalized_hits_tsv
 from textmining.syngrep import SynGrepResult
 from textmining.logging_utils import setup_logging
 from textmining.analysis import EvidenceAggregator, Grouper
 from textmining.normalization import normalized_successfully
+from textmining.models import NormalizedHit, CoOccurence
 import logging
-import time
-from collections import Counter
 from pathlib import Path
+from typing import Iterator
 
 # setup_logging configures the 'textmining' logger; this module is not under that
 # package, so name the logger explicitly or its records never reach the handlers.
@@ -66,54 +66,48 @@ def process_hits(output_name : str,
                  output_dir : Path,
                  entity_configs: list[EntityConfig],
                  sentence_pattern: str,
-                 syngrep_results: SynGrepResult):
-    type_to_ontology = {}
-    normalizers = {}
+                 syngrep_results: SynGrepResult) -> EvidenceAggregator:
+    type_to_ontology = {c.entity_type: c.get_graph() for c in entity_configs}
+    normalizers = {c.entity_type: c.get_normalizer() for c in entity_configs}
 
-    for entity_config in entity_configs:
-        type_to_ontology[entity_config.entity_type] = entity_config.get_graph()
-        normalizers[entity_config.entity_type] = entity_config.get_normalizer()
-
-    scorer = HitScorer(type_to_ontology=type_to_ontology)
-    hit_processor = HitProcessor(
-        hits_path=syngrep_results.hits_path,
-        synfile_map=syngrep_results.synfile_map_path,
-        synfile_type_map=syngrep_results.synfile_type_map_path,
-        type_to_ontology=type_to_ontology,
-        low_memory=False,
-        mir_normalizer=normalizers.get(HitType.MIR)
+    processor = Processor(
+        hits_processor=HitProcessor(
+            hits_path=syngrep_results.hits_path,
+            synfile_map=syngrep_results.synfile_map_path,
+            synfile_type_map=syngrep_results.synfile_type_map_path,
+            type_to_ontology=type_to_ontology,
+            low_memory=False,
+            mir_normalizer=normalizers.get(HitType.MIR),
+        ),
+        normalizers=normalizers,
+        scorer=HitScorer(type_to_ontology=type_to_ontology),
+        article_reader=MultiArticleReader(sentence_pattern),
     )
-    main_processor = Processor(hits_processor=hit_processor,
-                               normalizers=normalizers,
-                               scorer=scorer,
-                               article_reader=MultiArticleReader(sentence_pattern),)
-    aggregator = EvidenceAggregator()
-    article_stream = track_progress(main_processor.get_normalized_article_stream(), label='articles', report_every=1000)
-    article_stream = _tap_associations(article_stream, aggregator)
-    write_normalized_hits_tsv(article_stream, output_dir / f'{output_name}.norm')
+
+    hits = (hit
+            for article in processor.get_normalized_article_stream()
+            for hit in article.normalized_hits)
+    hits = write_normalized_hits_tsv(hits, output_dir / f'{output_name}.norm')
+    hits = track_progress(hits, label='hits', report_every=100_000)
+
+    cooccurrences = Grouper.extract_cooccurrences(_successfully_normalized(hits))
+    cooccurrences = write_cooccurrences_tsv(cooccurrences, output_dir / f'{output_name}.cooc')
+
+    aggregator = _aggregate_associations(cooccurrences)
     write_associations_tsv(aggregator.associations.values(), output_dir / f'{output_name}.assoc')
+    return aggregator
 
-def _tap_associations(article_stream, aggregator: EvidenceAggregator):
-    for article in article_stream:
-        # TODO: Check that normalized hits dont contain blacklisted/unresovled hits etc
-        cooccs = Grouper.extract_cooccurrences(iter(article.normalized_hits))
-        for cooc in cooccs:
-            aggregator.record_coccurrence(cooc)
-        yield article
 
-def _tap_normalized(hits, stats: Counter):
-    '''Filter to successfully normalized hits, counting both sides.
+def _successfully_normalized(hits: Iterator[NormalizedHit]) -> Iterator[NormalizedHit]:
+    """Pre-filter; Grouper.extract_valid_combinations applies the same predicate per pair."""
+    return (h for h in hits if normalized_successfully(h))
 
-    Grouper.extract_valid_combinations applies the same predicate internally;
-    hoisting it here is a pure optimisation (verified identical scores) and gives
-    the normalization rate for the run log.
-    '''
-    for hit in hits:
-        stats['hits'] += 1
-        stats[f'hits_{hit.entity_type.name}'] += 1
-        if normalized_successfully(hit):
-            stats['kept'] += 1
-            yield hit
+
+def _aggregate_associations(cooccurrences: Iterator[CoOccurence]) -> EvidenceAggregator:
+    aggregator = EvidenceAggregator()
+    for cooc in cooccurrences:
+        aggregator.record_coccurrence(cooc)
+    return aggregator
 
 
 def run_from_normalized_output(norm_hits_pattern: str, output_name: str, output_dir: str | Path, duck=True, debug=logging.INFO) -> EvidenceAggregator:
@@ -131,25 +125,15 @@ def run_from_normalized_output(norm_hits_pattern: str, output_name: str, output_
     logger.info('  source: %s (reader=%s)', norm_hits_pattern, 'duckdb' if duck else 'csv')
     logger.info('  output: %s', assoc_path)
     logger.info('  log:    %s', log_path)
-    start = time.perf_counter()
 
     hit_stream = read_normalized_hits(norm_hits_pattern) if duck else read_normalized_hits_tsv(Path(norm_hits_pattern))
-    stats = Counter()
-    successfully_normed_hits = _tap_normalized(hit_stream, stats)
+    successfully_normed_hits = _successfully_normalized(hit_stream)
 
-    aggregator = EvidenceAggregator()
-    for cooc in Grouper.extract_cooccurrences(successfully_normed_hits):
-        stats['cooccurrences'] += 1
-        aggregator.record_coccurrence(cooc)
+    coocs = write_cooccurrences_tsv(Grouper.extract_cooccurrences(successfully_normed_hits), output_path=output_dir / f'{output_name}.cooc')
+    aggregator = _aggregate_associations(coocs)
 
+    
     write_associations_tsv(aggregator.associations.values(), assoc_path)
-
-    hits, kept = stats['hits'], stats['kept']
-    logger.info('Read %d hits (%s)', hits,
-                ', '.join(f'{k.removeprefix("hits_")}={v}' for k, v in sorted(stats.items()) if k.startswith('hits_')))
-    logger.info('Kept %d normalized hits (%.1f%%)', kept, 100.0 * kept / hits if hits else 0.0)
-    logger.info('Recorded %d co-occurrences -> %d associations in %.1fs',
-                stats['cooccurrences'], len(aggregator.associations), time.perf_counter() - start)
     if not aggregator.associations:
         logger.warning('No associations produced - check that the run covers at least two entity types')
 

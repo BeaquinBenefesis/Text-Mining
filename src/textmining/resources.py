@@ -5,7 +5,6 @@ from textmining.models import HitType
 from textmining import external
 from textmining.synonym_utils import ExtractedSynonymSpec
 
-
 ## CORPUS
 CORPUS_DIR = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/corpus/filtered_corpus")
 CORPUS_SAMPLE = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/corpus/filtered_corpus/chunk_1.sent")
@@ -27,22 +26,25 @@ class OntologySource:
     url: str | None
     cache_path: Path
     obo_kwargs: dict = field(default_factory=dict)
+    source: str = ""   # short canonical label for entity.source, e.g. 'mondo', 'go'
 
 
 ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
-    HitType.DISEASE: OntologySource(HitType.DISEASE, 
+    HitType.DISEASE: OntologySource(HitType.DISEASE,
                                     MONDO_OBO,
                                     url=external.MONDO_OBO_URL,
-                                    cache_path=MONDO_OBO.with_suffix('.pkl'), 
-                                    obo_kwargs={'exclude_gci': True}),
-    HitType.TAXON:   OntologySource(HitType.TAXON, 
+                                    cache_path=MONDO_OBO.with_suffix('.pkl'),
+                                    obo_kwargs={'exclude_gci': True},
+                                    source='mondo'),
+    HitType.TAXON:   OntologySource(HitType.TAXON,
                                     TAXON_OBO,
-                                    url=external.TAXON_OBO_URL,     
-                                    cache_path=TAXON_OBO.with_suffix('.pkl')),
-    HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl')),
-    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl')),
-    HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl')),
-    HitType.BIOLOGICAL_PROCESS: OntologySource(HitType.BIOLOGICAL_PROCESS, GO_OBO, url=external.GO_OBO_URL, cache_path=GO_OBO.with_suffix('.pkl')),
+                                    url=external.TAXON_OBO_URL,
+                                    cache_path=TAXON_OBO.with_suffix('.pkl'),
+                                    source='ncbi_taxonomy'),
+    HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl'), source='cl'),
+    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl'), source='bto'),
+    HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl'), source='pw'),
+    HitType.BIOLOGICAL_PROCESS: OntologySource(HitType.BIOLOGICAL_PROCESS, GO_OBO, url=external.GO_OBO_URL, cache_path=GO_OBO.with_suffix('.pkl'), source='go'),
 }
 
 
@@ -112,3 +114,9 @@ def validate_paths(value):
             if f.metadata.get("skip_validation"):
                 continue
             validate_paths(getattr(value, f.name))
+
+
+
+## METADATA
+PUBMED_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pmc_metadata.csv")
+PMC_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pubmed_metadata.csv")

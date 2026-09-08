@@ -1,7 +1,66 @@
-from typing import Iterator
+import logging
+from typing import Iterator, Optional
 from itertools import groupby, combinations
 from textmining.models import CandidateHit, NormalizedHit, HitType, Association, CoOccurence
 from textmining.normalization import normalized_successfully
+
+logger = logging.getLogger(__name__)
+
+
+ENTITIES_PER_SENTENCE_CAP = 20
+
+class ArticleStreamGuard:
+    """Validates the ordering contract the downstream analysis relies on, and stamps
+    each article with a monotone epoch.
+
+    Since the external sort was dropped, articles arrive in the order syngrep emitted
+    them (per-chunk blocks) rather than globally sorted, so ordering can no longer be
+    checked by comparing article ids. Two properties still have to hold:
+
+    1. Article contiguity -- all hits of an article arrive consecutively. Violating it
+       makes AssociationEvidence open a second bucket for the same article and
+       double-count its evidence. Detecting this genuinely needs a set of article ids;
+       there is no O(1) test once global order is gone.
+    2. Non-decreasing (section, sentence) *within* an article. Grouper.group_by_sentence
+       uses itertools.groupby, which only collapses *adjacent* equal keys: a sentence
+       split across two groups silently loses every co-occurrence between the halves.
+       Any such split necessarily makes the key decrease, so this needs no set.
+
+    One instance guards the whole stream, so the article-id map is paid once per run
+    (~650k entries) rather than once per pipeline stage.
+    """
+
+    def __init__(self):
+        self._epochs: dict[str, int] = {}
+        self._article: Optional[str] = None
+        self._sentence_key: tuple[int, int] = (-1, -1)
+
+    def validate(self, hits: Iterator[NormalizedHit]) -> Iterator[NormalizedHit]:
+        for hit in hits:
+            if hit.article_id != self._article:
+                if hit.article_id in self._epochs:
+                    logger.critical('Article contiguity broken: %s reappears after %s',
+                                    hit.article_id, self._article)
+                    raise ValueError(f'Article contiguity broken: {hit.article_id} reappears')
+                self._epochs[hit.article_id] = len(self._epochs)
+                self._article = hit.article_id
+                self._sentence_key = (hit.section_num, hit.sentence_num)
+            else:
+                sentence_key = (hit.section_num, hit.sentence_num)
+                if sentence_key < self._sentence_key:
+                    logger.critical('Sentences out of order in %s: %s after %s',
+                                    hit.article_id, sentence_key, self._sentence_key)
+                    raise ValueError(
+                        f'Sentences out of order in {hit.article_id}: '
+                        f'{sentence_key} after {self._sentence_key}'
+                    )
+                self._sentence_key = sentence_key
+            yield hit
+
+    def epoch(self, article_id: str) -> int:
+        """Looked up by id rather than read off a 'current' counter: groupby reads one
+        hit past the end of a group, so the counter may already have advanced."""
+        return self._epochs[article_id]
 
 
 def overlapping_pair(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
@@ -19,19 +78,12 @@ def contained_pair(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     end_b = hit_b.start_position + hit_b.hit_length
     return hit_b.start_position <= hit_a.start_position and end_b >= end_a
 
-def _tap_order(hits: Iterator[CandidateHit]) -> Iterator[CandidateHit]:
-    prev_hit = None
-    for hit in hits:
-        if prev_hit and hit.sort_key < prev_hit.sort_key:
-            raise ValueError(f'Hits are not sorted, can not group by sentence id: {prev_hit.sort_key} {hit.sort_key}')
-        prev_hit = hit
-        yield hit
 
 class Grouper:
     
     @staticmethod
     def group_by_sentence(hits: Iterator[CandidateHit]) -> Iterator[tuple[str, list[NormalizedHit]]]:
-        for sentence_id, group in groupby(_tap_order(hits), key=lambda h: h.sentence_id):
+        for sentence_id, group in groupby(hits, key=lambda h: h.sentence_id):
             yield sentence_id, list(group)
 
     
@@ -54,19 +106,29 @@ class Grouper:
     
     @staticmethod
     def extract_cooccurrences(hits: Iterator[NormalizedHit]) -> Iterator[CoOccurence]:
-        for sentence_id, sentence_hits in Grouper.group_by_sentence(hits):
+        guard = ArticleStreamGuard()
+        for sentence_id, sentence_hits in Grouper.group_by_sentence(guard.validate(hits)):
             if len(sentence_hits) < 2:
                 continue
+            # Count distinct (start, length) spans, not raw hit rows: one literal
+            # mention can produce several NormalizedHits (e.g. a species-ambiguous
+            # miRNA mention resolves to one row per surviving taxon prefix), which
+            # would otherwise inflate this count without adding real distinct
+            # mentions.
+            distinct_spans = {(h.start_position, h.hit_length) for h in sentence_hits}
+            if len(distinct_spans) > ENTITIES_PER_SENTENCE_CAP:
+                continue
+            article_epoch = guard.epoch(sentence_hits[0].article_id)
             yield from (CoOccurence(article_id=hit_a.article_id,
                                     sentence_id=sentence_id,
                                     section_num=hit_a.section_num,
+                                    origin_file_name=hit_a.origin_file_name,
+                                    article_epoch=article_epoch,
                                     entity_types=(hit_a.entity_type, hit_b.entity_type),
                                     normalized_ids=(hit_a.normalization.normalized_id, hit_b.normalization.normalized_id),
                                     entity_positions=((hit_a.start_position, hit_a.start_position+hit_a.hit_length),
                                                       (hit_b.start_position, hit_b.start_position+hit_b.hit_length))) 
                         for hit_a, hit_b in Grouper.extract_valid_combinations(sentence_hits))
-
-                    
 
 class EvidenceAggregator:
     

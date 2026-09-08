@@ -91,6 +91,7 @@ class ArticleReader:
 
     def fetch_article(self, article_id):
         if article_id not in self.index:
+            logger.critical('Unknown article id: %s', article_id)
             raise ValueError(
                 f"Index for {article_id} in {self.file_path} does not exist."
             )
