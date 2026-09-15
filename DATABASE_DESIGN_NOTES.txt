@@ -175,6 +175,8 @@ FURTHER PRUNING — closure over OBSERVED terms only:
   table from that, not from the whole OBO.
 
   Also: follow only is_a. Already the case — relationship='is_a', _rel_subgraph.
+  [AMENDED 2026-09-15, section 15.1: the relationship set is per ontology. BTO
+   follows is_a + part_of; every other ontology stays is_a only.]
 
 
 ================================================================================
@@ -1347,7 +1349,7 @@ DECISION 2 -- FLAG, DON'T EXCLUDE, CROSS-ONTOLOGY CELL TYPES.
   (computed, never curated). UI hides flagged terms in the TISSUE facet by
   default; evaluation reports tissue results with and without them.
 
-DECISION 3 -- ACRONYM SHAPE HEURISTIC AT EXTRACTION.
+DECISION 3 -- ACRONYM SHAPE HEURISTIC AT EXTRACTION.  [IMPLEMENTED, N = 8, see 15.2]
   A synonym tagged ABBREVIATION by the source ontology goes to the abbreviation
   file as today. Otherwise, if its DICTIONARY string (text casing never reaches
   us; syngrep is case-insensitive) has no whitespace, length <= N, >= 2 uppercase
@@ -1489,9 +1491,8 @@ Observations for choosing the cutoff:
 
 14.5 NOT DONE -- BLOCKS THE RERUN
 ---------------------------------
-  - BTO: ONTOLOGY_ROOTS[TISSUE] still the four old roots; relationship is still a
-    single string (needs {is_a, part_of} for BTO, 13.2).
-  - Acronym-shape rule (13.4 decision 3) not implemented.
+  - [DONE 15.1] BTO roots and {is_a, part_of} relationship set.
+  - [DONE 15.2] Acronym-shape rule (13.4 decision 3).
   - refresh_data.py not run since root restriction: every graph load re-parses
     the OBO; synonym files date from 2026-08-26.
   - PATHWAY orphans (103 terms, 13.1): roots=None or add orphan roots.
@@ -1516,3 +1517,106 @@ Observations for choosing the cutoff:
   - Out-of-date text: DATABASE_IMPLEMENTATION_PLAN.md Stage 4 (flush-point
     propagation, split score columns, "root falls out at weight 0"); this file
     5.4, 8.3 score split, 6 and 8.8 summary lines.
+
+================================================================================
+15. AMENDMENT -- 2026-09-15(b): BTO RELATIONSHIPS AND ABBREVIATION HEURISTIC
+================================================================================
+
+15.1 RELATIONSHIP SETS PER ONTOLOGY (implements 13.2, amends 4)
+---------------------------------------------------------------
+  - OntologyGraph takes `relationships` (was `relationship`): stored as a sorted,
+    deduplicated tuple; a plain string is still accepted ('is_a' -> ('is_a',)),
+    an empty set raises. The same set drives root restriction, ancestors, IC,
+    depths/LCA and induced_subgraph. A pair linked by two kept relationships gets
+    parallel edges in _rel_subgraph; ancestors, descendants, depths and the
+    in-degree root test are unaffected.
+  - Configured on OntologySource.relationships (default ('is_a',)), next to roots.
+  - Cache identity: built_with(roots, relationships) replaces built_with_roots;
+    from_source and refresh_data.py treat a mismatch in either as stale. Class
+    default relationships = ('is_a',) so older pickles load as what they are.
+  - TISSUE: roots BTO:0001489 whole body + BTO:0001461 whole plant, relationships
+    (is_a, part_of). Measured on the real OBO: 2,583 nodes (was 140), roots
+    exactly those two, liver/lung/blood/brain/serum/heart/hepatocyte present,
+    0 cell lines, 0 `culture condition:` terms; ancestors(liver) = digestive
+    gland, endocrine gland, gland, viscus, whole body. Still a DAG.
+  - DISEASE / CELL / PATHWAY / GO-BP unchanged: is_a only, 31,551 / 3,325 /
+    2,601 / 23,974 nodes. GO-BP also has part_of edges; deliberately not followed
+    (one change at a time; would shift GO propagation, IC and LCA).
+  - Tests: tests/test_ontology_relationships.py (15).
+
+FINDING -- THE TISSUE DICTIONARY IS TERM NAMES ONLY. The 2,583 BTO terms give
+exactly 2,583 standard synonyms: extraction keeps EXACT-scope synonyms only, and
+BTO's synonyms are RELATED (e.g. "Koerper" on whole body). Tissue recall rests on
+exact term names. OPEN: whether to admit RELATED synonyms for BTO (they include
+foreign-language forms, so not wholesale).
+
+15.2 ABBREVIATION HEURISTIC (implements 13.4 decision 3)
+--------------------------------------------------------
+get_exact_synonyms puts an EXACT synonym into the abbreviation list if the
+ontology tags it ABBREVIATION (unchanged), OR if probable_abbreviation(text)
+holds and the text is not the term's own name:
+    no space, len <= 8, >= 2 uppercase letters, uppercase >= 50% of LETTERS
+Case is read from the dictionary string; syngrep matches case-insensitively, so
+text casing never reaches the rule.
+
+Choice of rule, evaluated against the 5,691 ontology-tagged abbreviations with an
+uppercase letter (disease + cell abbreviation files):
+  rule                                  recall tagged   flagged (dis/CL/GO/PW)  names
+  len<=5, >=2 upper, upper>=50%             75.3%        128 / 80 / 38 / 0       11
+  len<=8, same  (CHOSEN)                    97.4%        244 / 98 / 45 / 0       17
+  len<=10, same                             98.0%        287 / 113 / 45 / 0      18
+  len<=8, no lowercase run >= 3             97.3%        228 / 97 / 44 / 0       15
+  all letters uppercase, len<=8             96.1%        115 / 65 / 37 / 0       10
+  - Mixed case is kept on purpose: pDC, cDC, SSc, vCJD, EoE, aHUS are genuine
+    acronyms and include the pDC/cDC-type CL collisions.
+  - Denominator is letters, not len(): len() loses 22q11DS, EBS-loc, TSH-oma,
+    bHLHa26 (disease) and DC.4+, DC.8+, NK.sp, he-NK, T.DN4.th (CL).
+  - Term names are never reclassified (AIDS, COVID-19, PANDAS, VIPoma, GRFoma,
+    ILC1, ...): as abbreviations they would only count with article support; in a
+    46% post-2020 corpus that alone would cost COVID-19 recall.
+  - Not caught, accepted: word-like or gene-style tagged forms (Gla, Arts, Norse,
+    Chac, Sca1) and forms with spaces (MPS I, ML IV). A shape rule cannot tell
+    them from words; they are tagged anyway.
+
+Result on the current graphs (extract_synonyms):
+  type        standard synonyms   tagged   heuristic   abbreviations after
+  disease          85,366          5,737      232           5,969
+  cell              6,094             15       93             108
+  GO-BP            71,934              0       45              45
+  tissue            2,583              0        0               0
+  pathway           3,122              0        0               0
+Candidate lists: outputs/abbreviation_candidates_<type>.tsv (term_id, synonym,
+term_name); identical to the heuristic's output.
+
+Effect on resolution: a reclassified synonym is accepted only with article
+support (unambiguous mention elsewhere, or an inferred "(EMT)" definition);
+otherwise FAILURE. Collision acronyms now arbitrated by article evidence instead
+of the standard side winning: PD, LC, FS, ICC, cDC (disease x CL), MAD (disease x
+GO), PMN (CL x GO). "PD" no longer resolves to the crustacean pyloric dilator
+neuron by default. COP was already tagged on both sides.
+COST: recall for acronyms used without definition. GO is most exposed (EMT, NHEJ,
+OXPHOS move from always-accepted to article-dependent). Measure with the sample
+run: group statuses of the 370 reclassified strings.
+
+Known, pre-existing: 8 disease synonyms are in both lists (IgAD1, CGF1, AIDS,
+CADDS, ...). MONDO itself TAGS these term names as ABBREVIATION, and
+extract_synonyms also adds every name as standard. Harmless in resolution (same
+id, standard survives). Optional cleanup: apply the name exception to tagged
+synonyms too.
+Not done: an audit TSV written by refresh_data.py (get_exact_synonyms does not
+report why a synonym is an abbreviation); unit tests for probable_abbreviation.
+Correction to an earlier review: scripts/ontology/create_obo_import.py defines its
+own get_exact_synonyms and is not affected.
+
+15.3 REMAINING BEFORE THE RERUN (supersedes 14.5)
+-------------------------------------------------
+  - Run refresh_data.py: rewrites the shared caches and regenerates the synonym
+    files (bto.syn 140 -> 2,583 terms; new abbreviation entries for disease, CL,
+    GO). Then rerun the collision script (expect ~256 CL x BTO shared synonyms).
+  - PATHWAY orphans (103 terms): roots=None or add orphan roots.
+  - MONDO anatomy-as-disease synonyms: document or automatic rule.
+  - BTO RELATED synonyms: decide (15.1).
+  - Sample run on CORPUS_SAMPLE_SMALLER: group statuses vs the 2026-09-08 log
+    (AMBIGUOUS_ENTITY_TYPE only MIR collisions, RESOLVED_MULTI_TYPE led by
+    Wnt/Notch/PPAR, statuses of the 370 reclassified acronyms), no BFO ancestors,
+    propagation growth vs the 5.5x slice figure, timing.
