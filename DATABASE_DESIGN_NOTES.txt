@@ -217,24 +217,78 @@ FAILURE MODE IF DONE POST-HOC (summing final descendant scores into the ancestor
   LEAST informative terms. Would show up in evaluation as high-level MONDO terms
   topping every ranking. This is a real methodological flaw, not a tuning issue.
 
-CORRECT PLACEMENT: propagate at the CO-OCCURRENCE level, so all propagated
-contributions for one article land in the same _current_article_sum bucket and are
-compressed together.
+CORRECT PLACEMENT: propagated weight must land in the ANCESTOR association's open
+article bucket (_current_article_sum) before that bucket is flushed, so all of one
+article's direct and propagated contributions are compressed together.
 
-Minimal change to the existing streaming design:
-  - CoOccurence gains `weight: float = 1.0`;
-    score becomes `weight * section_weigth(section_num)`
-  - Grouper.extract_cooccurrences yields, for each direct (mir, term) pair,
-    additional CoOccurences for (mir, ancestor) with a decayed weight.
+[REVISED 2026-09-13 -- the original "minimal change" (extra CoOccurences with a
+ decayed weight, yielded from Grouper) and the per-article EFFICIENCY NOTE are both
+ withdrawn. Reasons below.]
 
-Everything downstream (EvidenceAggregator, article flush, corpus log) is unchanged,
-and double-counting is correctly damped because it happens inside one article bucket.
+DESIGN OF RECORD: per co-occurrence, direct call, no synthetic CoOccurences.
+  For each direct CoOccurence recorded by EvidenceAggregator:
+    - record it on the direct (mir, term) association as before;
+    - for each cached ancestor A of term (OntologyGraph closure, is_a only):
+        ancestor_assoc.record_propagated(epoch, article_id,
+                                         cooc.score * decay(term -> A))
+  AssociationEvidence.record_propagated shares the epoch check and lazy flush of
+  record_cooccurrence, so the contribution joins the ancestor's bucket for that
+  article. EvidenceAggregator holds NO article-boundary state.
 
-EFFICIENCY NOTE: expanding per SENTENCE multiplies the co-occurrence stream ~20x.
-Cheaper to expand once per ARTICLE, at the flush point already present in
-_flush_article_evidence: accumulate the article's direct (mir, term) -> weight map
-first, then expand to ancestors once. Same result (sums within an article are
-commutative), less work when a term recurs across sentences, dedups naturally.
+WHY NOT SYNTHETIC CoOccurences (inferred flag or not):
+  write_cooccurrences_tsv is a pass-through between Grouper and the aggregator
+  (pipeline.py), and db/loaders/corpus.py builds association_evidence from .cooc.
+  Synthetic rows would multiply .cooc (~31M -> ~180M rows) and give propagated
+  associations "evidence" sentences that do not contain the ancestor term, with
+  spans that do not exist. A CoOccurence records an observation at a location in
+  text; a propagated contribution has no location. Keep it out of that type.
+
+WHY NOT BUFFER PER ARTICLE (the withdrawn efficiency note):
+  Equivalent result, since decay is linear in the per-co-occurrence score
+  (see CONSTRAINT below). Measured saving is small: on a 4,000-article sample,
+  per-co-occurrence expansion made 366,756 propagation calls vs 125,006 per
+  (article, mir, term) -- about 3x. At ~0.2 us/call that is ~1 min over the full
+  disease run (~140M calls), against a 91s .norm scan alone. It would also add
+  three failure modes the per-co-occurrence form does not have:
+    - read-then-write ordering (a touched term that is also an ancestor of another
+      touched term gets its propagated weight propagated again);
+    - coupling to AssociationEvidence's lazy flush timing;
+    - an explicit end-of-stream flush (the `pending` term in score only rescues
+      the last article's in-bucket sum; per-co-occurrence already puts propagated
+      weight there).
+
+IMPLEMENTATION REQUIREMENTS:
+  - Iterate the CLOSURE, not parent-by-parent. The IC ratio telescopes along one
+    path, but an ancestor reachable by k paths in a multi-parent DAG would receive
+    k contributions.
+  - Cache decay(term -> A) with the ancestor list: one lookup in the hot loop, not
+    two IC lookups and a division.
+  - Skip ancestors with decay 0 (the root, IC = 0) or below a floor. Saves calls
+    and avoids creating associations that can only score 0 (cf. 12.4 root junk,
+    8.3 sizing warning).
+  - Do NOT use dict.setdefault(key, Association(...)) on this path: it constructs
+    an Association per call even when the key exists. Measured 0.62 us/call vs
+    0.18 us for get + record_propagated. Same issue on the existing direct path.
+  - New ancestor associations take entity_types (MIR, term_type) from the source.
+
+CONSTRAINT THIS PLACEMENT COMMITS TO (state it in the methods chapter):
+  Propagation must be a LINEAR map: the ancestor's contribution is a fixed scalar
+  multiple of each direct contribution, the scalar depending only on (term, A).
+  Per-co-occurrence factors (section weight, a future token-distance decay) are
+  fine -- they are inside cooc.score. Not expressible here: article-level rules
+  such as MAX over descendants instead of SUM, or conditioning on how many
+  distinct subtypes an article hit. Sentence-context rules (e.g. suppress
+  propagation to A in a sentence that names A directly) remain expressible --
+  a sentence's co-occurrences arrive adjacently -- at the cost of a per-sentence
+  buffer.
+
+DIRECT vs COMBINED SCORE: one accumulator, one score column. "Attested vs
+inferred" is answered by association_evidence rows / n_articles_direct, not by a
+second score. The direct-only HMDD ablation is a second build with propagation
+off, consistent with 8.2's one-scoring-config-per-file; record the propagation
+flag and ontology snapshot in build provenance so the two files are distinguishable.
+If both scores are ever wanted in one file, they need two accumulators:
+log2(1+d) + log2(1+p) != log2(1+d+p). [Supersedes the split in 5.4 and 8.3.]
 
 
 5.3 DECAY FUNCTION: IC RATIO, NOT HOP DISTANCE
@@ -792,3 +846,673 @@ ontology_closure and corpus because both derive from it (ontology_closure's
 observed-term set is `SELECT DISTINCT term_entity_id FROM association`;
 corpus resolves each co-occurrence's association_id against it).
 ================================================================================
+
+================================================================================
+11. AMENDMENT -- 2026-09-09: USER INTERFACE, AND WHAT BUILDING IT CHANGED
+================================================================================
+
+Scope: the "user interface" work package. Adds the mention layer, miRBase name
+history and search index to the schema of section 8.3/10, and records five
+findings from querying the built atlas.db that changed the design. Everything in
+sections 9 and 10 stands.
+
+11.1 THE CORPUS IS 99% POST-2010 -- TIMELINES MUST BE NORMALISED
+----------------------------------------------------------------
+Measured over article.year: pre-2010 is 2,499 articles (1.0%), 2020+ is 45.7%.
+
+A raw per-year mention count therefore measures corpus coverage, not research
+activity. Measured on the 20 most-associated human miRNAs, the raw curve peaks
+in 2021 or 2022 for 20 of 20 -- every miRNA appears to be "currently trending"
+because the corpus is. Dividing by that year's article total disperses the peaks
+across 1998-2025 (5 of 20 at 2021+), which matches the actual history of the
+field: early let-7/lin-4 work, then the 2013 boom.
+
+DECISION: share = n_articles(mir, year) / n_articles_corpus(year) is the default
+series everywhere and the quantity the research score is built from. Raw counts
+stay visible as context bars so sample size is never hidden. corpus_year holds
+the denominator.
+
+CONSEQUENCE FOR THE RESEARCH SCORE: its volume term sums yearly shares, not
+articles, and it deliberately has NO recency component -- the corpus is already
+recency-biased and a recency term would double-count that. Weights are
+provisional; validate against HMDD entry count per miRNA (Stage 5) before
+reporting the score as a result. It measures attention, not characterisation.
+
+11.2 THE MENTION LAYER IS BACK, AT PAIR GRANULARITY
+----------------------------------------------------
+association_evidence only covers sentences where a miRNA co-occurred with an
+ontology term, so a timeline derived from it answers "how often was this miRNA
+annotated", not "how often was it mentioned". Methodology, target-validation and
+biomarker papers naming no partner term in the same sentence vanish.
+
+  mir_mention_article(mir_key, article_id, blacklisted)     3,694,133 rows
+
+Measured cost: one duckdb pass over the 19GB .norm, 92s end to end (91s of it
+the raw scan; the aggregation is ~1s). Three granularities were considered --
+counts only (240,754 rows), (mir, article) pairs, and full mentions with
+positions (19.4M rows). Pairs won: counts alone give a chart that cannot be
+clicked through to the articles behind a bar, and full mentions roughly double
+the file for flexibility rather than a named feature. Counts derive from pairs
+with a GROUP BY, so nothing is lost.
+
+mir_key is TEXT and NOT a foreign key to entity, deliberately: blacklisted hits
+normalise to no accession, and carrying them is the point (11.3).
+
+SIDE EFFECT: mentions span 320,963 articles against the 273,702 the corpus
+loader created. The missing 46,963 are inserted before article_metadata runs, so
+the metadata pass backfills them too -- articles with a year rose from 240,539
+to 281,435.
+
+11.3 AMBIGUOUS miRBASE IDENTIFIERS ARE SURFACED, NOT RESOLVED
+--------------------------------------------------------------
+MirNormalizer marks a mention IN_BLACKLIST when its name has been carried by
+more than one accession across releases, and returns normalized_id = None. Those
+hits never become co-occurrences, so they were absent from the database entirely.
+
+The aggregate looks negligible and the distribution is not: IN_BLACKLIST is
+140,614 of 38,599,130 MIR hits (0.36%), but the top 20 names carry 79% of it,
+and they are not obscure -- hsa-mir-378 (13,512 hits) and hsa-mir-34b (12,578)
+alone are 18.6%. A reader searching miR-34b would silently get nothing.
+
+RESOLUTION WAS CONSIDERED AND REJECTED. The release history dates the switchover
+exactly (hsa-miR-34b was MIMAT0000685 through v9_2, MIMAT0004676 from v10), and
+article.year now exists, so mentions could in principle be assigned by
+publication date. But publication year dates the PAPER, not the annotation its
+authors were working from: pipelines lag releases and reviews inherit legacy
+names from their sources. It would be a guess with no bound on its error, which
+is not something a knowledgebase should do silently.
+
+INSTEAD: /name/{name} shows the release history, the candidate accessions, and
+the mention timeline for the surface form -- the one place these mentions are
+visible. Resolution stays out.
+
+11.4 THE miRBASE HISTORY TABLES CLOSE TWO OPEN ITEMS
+-----------------------------------------------------
+mirna_mature_history.tsv / mirna_precursor_history.tsv (544,564 rows combined:
+mirna_name, accession, version, dead, new_name) are a superset of the
+*_id_conflicts.tsv files -- conflicted names are exactly those mapping to more
+than one accession, verified SET-IDENTICAL to the normalizer's actual blacklist
+(218 distinct lowercase names). The conflict files are no longer needed as an
+input, which also sidesteps the duplicated header row both of them carry (it puts
+the literal string "mirna_name" into ambiguous_mature / ambiguous_precursors).
+
+  (a) miRNA SYNONYMS, previously "no literal source identified" -- mir_regex.syn
+      is patterns, not surface forms. The history names ARE literal surface
+      forms: 8,421 of 49,440 mature and 1,329 of 39,314 precursor accessions
+      have carried more than one name. 9,970 legacy synonyms loaded, so
+      'hsa-miR-34b*' now finds MIMAT0000685. The 218 ambiguous names are
+      withheld from `synonym` on purpose and routed to the conflict view.
+
+  (b) entity.obsolete, previously hardcoded 0 -- the mapping TSVs carry no
+      dead signal, the history files do. Also inserts 1,324 accessions that
+      appear in history but not in the current mapping files, so a conflict page
+      can render whichever side is no longer current.
+
+      UNEXPECTED: loading those accessions recovered 4,760 associations.
+      load_associations skips rows whose miRNA accession is missing from entity
+      (the "dead mirnas" TODO); they were being dropped silently. association
+      went 1,295,770 -> 1,300,530, evidence 17,906,906 -> 17,936,913.
+
+CASE IS LOAD-BEARING. miRBase distinguishes a precursor from its mature product
+by capitalisation alone -- hsa-mir-34b is the hairpin, hsa-miR-34b the mature
+strand. Conflicts must be grouped WITHIN a reference_level; casefolding a
+combined list collapses the two namespaces and reports 24,768 false conflicts
+instead of 274.
+
+11.5 INDEXES, AND THE ONE THAT HAD TO COVER
+--------------------------------------------
+The built database had no indexes beyond UNIQUE autoindexes; the miRNA timeline
+query measured 5.6s and association_evidence lookups scanned 17.9M rows. Six
+indexes fixed it (schema/core.sql).
+
+One is not obvious: ix_ae_assoc must be (association_id, sentence_id), not
+association_id alone. The evidence view pages by DISTINCT sentence, and the
+single-column index yields rowids that then need one random row fetch each to
+read sentence_id -- 2.9s per page on the largest association. With sentence_id
+in the index the page is an ordered range scan: 0.017s.
+
+Also cached: the organism filter menu is an aggregate over all 1.3M associations
+(0.32s) and was recomputed per page load. The database is opened immutable, so
+it is computed once per process.
+
+11.6 QUERY EXPANSION IS MAX, NEVER SUM
+---------------------------------------
+Searching a broad term joins ontology_closure to reach subtype associations.
+Scores are aggregated with MAX and the matched descendants are shown as
+"matched via". Summing descendant scores is the section 5.2 failure mode:
+each is already log-compressed per term, so adding them inflates broad terms in
+proportion to how many subtypes happen to co-occur. The UI labels this as query
+expansion (5.1a), not the precomputed evidence propagation of 5.1b, which does
+not exist yet.
+
+ontology_closure holds STRICT ancestry -- ancestors() excludes self -- so a term
+must be unioned with its descendants or its own associations disappear from its
+own page.
+
+11.7 EVIDENCE HIGHLIGHTING IS EXTENDED AT RENDER TIME
+------------------------------------------------------
+Term spans are stored correctly. miRNA spans are not: mir_regex.syn matches only
+the stem, so 743,345 of ~794k stored miRNA spans are exactly 3 characters
+('miR'), and the identifying digits live in a `suffix` field that never reaches
+the database (analysis.py builds entity_positions as start + hit_length).
+Highlighting the stored span renders "**miR**-26b-5p".
+
+WORKAROUND: extend rightward over name characters, (?:[-\w*]|\.(?=\w))*, which
+recovers the surface form from the sentence text. The lookahead on the dot
+matters -- without it a sentence-final period is highlighted too. Validated over
+1,816 spans: mean length 3 -> 8.7 chars, none malformed.
+
+KNOWN LIMITATION: in an enumeration such as "miR-21, 221 and 16" three
+normalized ids share one span, so all three extend to "miR-21". The correct fix
+is threading `suffix` through CoOccurence -> .cooc -> loader; do it at the next
+re-extraction, not before.
+
+11.8 CODE LAYOUT
+-----------------
+  src/textmining/db/loaders/mentions.py       .norm -> mir_mention_article,
+                                              corpus_year (duckdb)
+  src/textmining/db/loaders/mirna_history.py  history TSVs -> mirna_name_history;
+                                              conflict derivation
+  src/textmining/db/loaders/search.py         -> search_name
+  src/textmining/web/app.py                   FastAPI routes
+  src/textmining/web/queries.py               one function per panel, raw SQL
+  src/textmining/web/highlight.py             span extension and <mark> rendering
+  src/textmining/web/templates/, static/      Jinja pages, CSS, Chart.js glue
+  scripts/web/run_ui.py                       dev server
+  scripts/web/verify_ui.py                    the checks above, runnable
+
+Server-rendered Jinja over a read-only immutable connection, one connection per
+thread. Filters and paging are query parameters, so every view is a real URL:
+bookmarkable, and debuggable without a browser. The only client-side code is the
+timeline chart.
+
+search_name is restricted to reachable entities -- terms with associations or
+closure ancestry, miRNAs with mentions -- which is what keeps the 2,854,488
+TAXON entities out of the search path. 147,520 rows over 49,525 entities.
+
+11.9 STILL OPEN
+----------------
+  - Synonym feedback loop (thesis_instructions.txt work package): not built. It
+    is the only feature that would make the database writable. Deliberate v1
+    omission; confirm with the supervisor.
+  - Research score weights unvalidated (11.1).
+  - Enumeration highlighting (11.7).
+  - Querying the MONDO root expands to 3,454 descendants and takes 1.4s. Every
+    other view is under 50ms. Degenerate case, left alone.
+
+================================================================================
+12. AMENDMENT -- 2026-09-11: TAXON DROPPED FROM THE DATABASE, TWO STORAGE FIXES
+================================================================================
+
+12.1 TAXON IS NOT LOADED AT ALL -- completes the decision section 4 started
+---------------------------------------------------------------------------
+Section 4 excluded taxonomy from the closure because taxon is not an annotation
+dimension: propagation up it terminates every association at "associated with
+Eukaryota", which is no annotation content. But taxon ENTITIES and SYNONYMS were
+still being loaded, which was the leftover inconsistency.
+
+Measured against the built database, nothing referenced them:
+
+  entity rows            2,854,488   (94.9% of the entity table)
+  synonym rows           2,970,884   (94.2% of the synonym table)
+  closure rows                   0
+  search_name rows               0
+  associations (either side)     0
+  mir_mention_article rows       0
+
+Taxa ARE load-bearing -- NormalizationContext.get_taxon_relevance() decides which
+species prefix a bare 'mir-21' resolves to -- but that runs at EXTRACTION time,
+reading the synonym files from disk, upstream of this database. By the time .norm
+exists the species is already baked into the accession. atlas.db never consults it.
+
+DECISION: skip HitType.TAXON when loading ontology graphs in build_db.py. One
+exclusion suffices, because load_entities, load_synonyms and load_ontology_closure
+all iterate `ontology_graphs`; no loader needed changing.
+
+  entity   3,006,860 -> 152,372
+  synonym  3,153,193 -> 182,309
+  file          2.44 GB -> 1.75 GB
+  build         17 min -> 16 min (the taxonomy .pkl alone was 27.5s of a 29s
+                graph load; entity+synonym loading went 42s -> 2s)
+
+The organism dimension is unaffected: entity.organism is derived from the miRBase
+accession prefix, not from taxon hits. If a taxonomic rollup is ever wanted,
+section 4 already specifies a curated ~30-row table.
+
+12.2 mir_mention_article IS WITHOUT ROWID
+------------------------------------------
+A composite PRIMARY KEY on a rowid table builds a SEPARATE unique index
+duplicating both key columns, so the data is stored twice. Measured: 83.7MB table
+plus a 90.5MB autoindex -- the index LARGER than the table -- and every query read
+the index (EXPLAIN showed USING COVERING INDEX), never the table.
+
+WITHOUT ROWID stores the rows once, in the primary-key b-tree itself: 174.2MB ->
+78.7MB. Row content and the uniqueness guarantee are unchanged; verified the
+rebuild reproduces exactly 3,694,133 pairs.
+
+This is the right shape for any pure junction table whose primary key is its whole
+identity and whose payload is small.
+
+12.3 ix_entity_type_org REMOVED
+--------------------------------
+Added on the assumption that organism filtering needs an index. EXPLAIN QUERY PLAN
+on all four main queries never chose it: filtering always reaches `entity` by
+rowid from `association` and then tests the column, so the index is never the
+access path. 49.9MB. The schema now carries a comment recording why it is absent.
+
+12.4 NEW FINDING -- 1-CHARACTER TERM SPANS (upstream, not fixed)
+-----------------------------------------------------------------
+0.56% of evidence rows (99,560 of 17,936,913) have a term span exactly one
+character long -- a single letter or digit matched as an ontology term. They
+resolve overwhelmingly to ontology ROOTS:
+
+  '2' -> disease (MONDO_0000001)   5,417      'A' -> cell (CL_0000000)     2,892
+  'A' -> transport (GO_0006810)    2,255      'A' -> pathway (PW_0000001)  1,587
+
+Related: 'AD' (72,041 rows) and 'PD' (37,791) resolve to the generic `disease`
+root rather than to Alzheimer's and Parkinson's disease.
+
+This is a synonym/abbreviation-resolution defect upstream of the database; the UI
+renders faithfully what the pipeline produced. Two things follow. First, the
+associations built on these rows are junk. Second, they concentrate on exactly the
+least informative terms -- which is what section 5.3's IC-ratio decay is designed
+to zero out, since the root has IC=0 by construction. Implementing propagation
+(Stage 4) would suppress their score contribution without special-casing anything.
+
+NOTE FOR THE CHECKER: 2-character term spans are NOT anomalous. They are real
+ABBREVIATION synonyms and account for 7.9% of evidence -- GC gastric cancer, OA
+osteoarthritis, BC breast cancer, MI myocardial infarction, RA rheumatoid
+arthritis, OS osteosarcoma. Only length 1 is suspect.
+
+12.5 OBSERVED -- INDEXES ARE BUILT DURING LOAD, NOT AFTER
+----------------------------------------------------------
+The CREATE INDEX statements live in schema.sql, so every index exists while the
+bulk load runs and is maintained per insert. Building one afterwards over sorted
+data packs denser: ix_ae_assoc is 315.7MB when built during the load against
+278.3MB when dropped and recreated on the finished table. Moving the CREATE INDEX
+statements into build_db.py after the loaders would recover ~37MB and probably
+some of the 8-minute corpus stage, which inserts 17.9M rows. Not done.
+
+================================================================================
+13. AMENDMENT -- 2026-09-13: ONTOLOGY ROOTS, BTO SCOPE, SYNONYM COLLISIONS
+================================================================================
+
+Extraction-side findings; nothing in the database schema changes. They matter here
+because every one of them changes which associations exist.
+
+13.1 GRAPHS ARE RESTRICTED TO CONFIGURED ROOTS AT LOAD
+-------------------------------------------------------
+OntologySource.roots (resources.ONTOLOGY_ROOTS) restricts each graph to the roots
+plus descendants before anything else is derived (ontology.py, restrict_to_roots).
+The pickle cache records the roots it was built with; a mismatch is treated as
+stale. TAXON is NOT restricted: 20,598 LINNAEUS synonym ids lie outside
+cellular organisms + viruses.
+
+Measured effect (own-prefix = terms of the ontology itself, not imports):
+
+  type      total   own-prefix   kept    own dropped   note
+  DISEASE   60,377  32,408       31,551  857           27,969 imports removed;
+                                                       18-term `injury` branch
+                                                       is outside `disease`
+  CELL      18,878   3,335        3,325   10           imports removed
+  TISSUE     6,511   6,511          140   6,371        BROKEN, see 13.2
+  PATHWAY    2,704   2,704        2,601   103          orphans with no is_a path
+                                                       to PW:0000001 (e.g. cell
+                                                       cycle checkpoint pathway)
+  GO-BP     38,092  38,092       23,974  14,118        exactly the MF + CC terms
+
+Consequence for 5.3: the old MONDO graph had 1,768 roots and node_num 60,377, so
+IC(disease) was 0.649 and BFO upper-level terms (entity, continuant, disposition)
+received ~6-10% of every disease co-occurrence by propagation. After restriction,
+single-rooted ontologies give their root IC 0. Section 12.4's "MONDO_0000001 is
+the root" was wrong for the graph as then built (the root was BFO_0000001).
+
+DECISION: do not special-case roots. Uninformative general terms are removed by a
+threshold on normalised structural IC (IC / log N, comparable across ontologies),
+applied BEFORE any cross-association normalisation. Sample values: disease 0.00,
+human disease 0.03, cancer 0.25, carcinoma 0.34, breast cancer 0.56; GO
+cellular process 0.09, regulation of biological process 0.10, apoptotic process
+0.58. Pick the cutoff from the distribution of associated terms, not by
+optimising against HMDD; report two or three cutoffs.
+
+13.2 BTO: THE FOUR ROOTS KEPT THE WRONG 140 TERMS
+-------------------------------------------------
+bto.syn has always had 140 ids. ONTOLOGY_ROOTS[TISSUE] = animal, plant, fungus,
+other source; over is_a these reach developmental stages, spores and culture
+types, almost no anatomy. atlas.db (2026-09-11): 25,761 TISSUE associations over
+73 terms, top 'animal' 5,416, 'plant' 3,795, 'embryo' 3,021, 'cell culture'
+2,697. TISSUE results in that build are not usable.
+
+Cause: BTO organises anatomy mainly by part_of. 2,206 of 6,511 terms have no is_a
+parent, 1,816 have no is_a edge at all; blood, heart, brain, serum have no is_a
+parent, liver and lung have no part_of parent. Neither relation alone covers it.
+
+  roots / relations                     terms   liver lung blood brain
+  4 current roots, is_a                  140     -     -    -     -
+  whole body, part_of only               744     -     -    +     +
+  whole body, is_a + part_of           2,212     +     +    +     +
+  whole body + whole plant, is_a+part_of 2,583 (overlap 5)
+
+The last row is still a DAG, contains 0 cell lines and 0 `culture condition:`
+terms, and its restricted roots are exactly the two configured ones.
+
+CONSEQUENCES:
+  - `relationship` must become a SET per ontology ({is_a, part_of} for BTO,
+    {is_a} elsewhere), used identically for restriction, ancestors, IC and
+    closure. Section 4's "follow only is_a" becomes a per-ontology choice.
+  - The cache staleness key must include the relationship set.
+  - BTO under these roots contains cell-type terms that CL also has; see 13.3.
+  - Fixing it is upstream: regenerate bto.syn, re-run syngrep + normalization for
+    TISSUE, re-aggregate, rebuild. Fix PATHWAY orphans in the same pass.
+
+13.3 SYNONYM COLLISIONS BETWEEN SYNONYM FILES
+---------------------------------------------
+Why it matters: same-span hits with different ids form one HitGroup. If no id is
+supported by an unambiguous mention elsewhere in the article and the group holds
+more than one entity type, _resolve_groups ends in AMBIGUOUS_ENTITY_TYPE and the
+mention is DROPPED -- it becomes neither type. Full run 2026-09-08: 186,991 groups
+dropped this way. Top: 'Wnt signaling pathway' 29,728, 'PMN' 27,501,
+'hypersensitivity' 19,144, 'Notch signaling pathway' 16,131, 'pentose phosphate
+pathway' 8,731, 'zygote' 6,809.
+
+Method: dictionaries only. A collision is the same synonym string in two synonym
+files. Counted exact, and casefolded (syngrep matches case-insensitively,
+verified in .hits: 'LiN' matched synonym 'lin'). bto_NEW = whole body + whole
+plant over is_a + part_of (13.2), extracted in memory. Empty files skipped:
+tissue_abbreviations, pathway_abbreviations, biological_process_abbreviations.
+BTO has no ABBREVIATION-tagged synonyms, so bto_NEW_abbr is empty.
+Script: scratchpad collisions.py (not in repo).
+
+EXACT -- shared synonyms (upper triangle)
+                 mir_rege  species cell_lin  disease disease_      bto       cl cell_abb       pw       go  bto_NEW
+mir_regex                        1        0        0        1        0        0        0        0        0        0
+species                                   0       10        6        1        0        0        0        0        1
+cell_lines(TAX)                                    0        0        0        2        0        0        0        1
+disease                                                    14        0        0        0        2        7        6
+disease_abbr                                                         0        7        1        0        1        1
+bto                                                                           5        0        0        0       96
+cl                                                                                     0        0        1      256
+cell_abbr                                                                                       0        0        0
+pw                                                                                                      36        0
+go                                                                                                                0
+
+EXACT -- terms in ROW file affected by COLUMN file
+                 mir_rege  species cell_lin  disease disease_      bto       cl cell_abb       pw       go  bto_NEW
+mir_regex                        1        0        0        1        0        0        0        0        0        0
+species                 1                 0       11        6        1        0        0        0        0        1
+cell_lines(TAX)         0        0                 0        0        0        2        0        0        0        1
+disease                 0       10        0                14        0        0        0        2        6        6
+disease_abbr            1        6        0       15                 0        8        1        0        1        1
+bto                     0        1        0        0        0                 5        0        0        0       96
+cl                      0        0        2        0        7        5                 0        0        1      247
+cell_abbr               0        0        0        0        1        0        0                 0        0        0
+pw                      0        0        0        2        0        0        0        0                32        0
+go                      0        0        0        6        1        0        1        0       32                 0
+bto_NEW                 0        1        1        6        1       96      256        0        0        0
+
+CASEFOLDED -- shared synonyms (upper triangle)
+                 mir_rege  species cell_lin  disease disease_      bto       cl cell_abb       pw       go  bto_NEW
+mir_regex                        1        0        0        2        0        0        0        0        0        0
+species                                   0       12       14        1        0        0        0        1        1
+cell_lines(TAX)                                    0        0        0        3        0        0        0        1
+disease                                                    19        0        0        0        2        7        8
+disease_abbr                                                         0        9        1        0        1        2
+bto                                                                           5        0        0        0       96
+cl                                                                                     0        0        1      258
+cell_abbr                                                                                       0        0        0
+pw                                                                                                      53        0
+go                                                                                                                0
+
+NOT cross-type collisions: bto x bto_NEW (same ontology; 96 of the current 140
+terms survive the new roots) and disease x disease_abbr (same type, resolved by
+id, not dropped).
+
+Cross-type pairs, exact count, with examples:
+  cl x bto_NEW        256  ovum, neuron, oocyte, zygote, basophil, Th1 cell
+  pw x go              36  Wnt/Notch/PPAR/TSH signaling pathway, pentose phosphate
+                           pathway (53 casefolded)
+  species x disease    10  SIV, anthrax, smallpox, Hepatitis D virus, Candida glabrata
+  disease x go          7  hypersensitivity (+ types I/III/IV), rumination,
+                           lithium transport
+  disease_abbr x cl     7  PD, LC, FS, VD, CDP, ICC, cDC
+  species x dis_abbr    6  pig, MRSA, HDV, MAC, PVA, LI
+  disease x bto_NEW     6  epididymis, hypophysis, seminal vesicle, subcutis,
+                           ovotestis, apocrine sweat gland
+  bto x cl              5  zygote, conidium, ascospore, endospore, basidiospore
+  disease x pw          2  kuru, carnitine-acylcarnitine translocase deficiency
+  cell_lines(TAX) x cl  2  G cell, R1 cell
+  mir_regex x dis_abbr  1  let (LIN too, casefolded)
+  singles               1  bantam (mir x species), clove (species x bto),
+                           face (dis_abbr x bto_NEW), COP (dis_abbr x cell_abbr),
+                           MAD (dis_abbr x go), PMN (cl x go)
+
+Findings that are NOT collisions in the ownership sense but data errors:
+  - MONDO lists anatomy words as EXACT synonyms of inflammation terms:
+    MONDO_0004779 epididymitis <- 'epididymis', hypophysitis <- 'hypophysis',
+    seminal vesiculitis <- 'seminal vesicle', panniculitis <- 'Subcutaneous
+    tissue'. Today every 'epididymis' mention is a disease hit.
+  - 'pig' is the abbreviation PIG of MONDO_0016321 (pulmonary interstitial
+    glycogenosis) -- a valid abbreviation, not an error. It is harmless in
+    practice: see 13.4, abbreviation-vs-standard collisions resolve to the
+    standard side unless the abbreviation is supported in the article.
+  - The abbreviation files carry lowercase duplicates ('pig', 'face', 'let');
+    harmless for matching (case-insensitive), but they are what collides.
+
+13.4 COLLISION POLICY -- DECIDED 2026-09-14 (supersedes the 2026-09-13 draft)
+------------------------------------------------------------------------------
+GOAL: keep refresh_data.py fully automatic. No hand-curated owner tables that a
+new ontology release can invalidate. Some precision is traded for that, and the
+trade is stated in the methods.
+
+WHERE MENTIONS ARE LOST TODAY. _resolve_groups removes ABBREVIATION-typed hits
+(from *_abbreviations.syn) from a group unless their id is supported by an
+unambiguous mention in the same article. Hence:
+  standard x standard         -> both survive -> AMBIGUOUS_ENTITY_TYPE, mention
+                                 dropped (186,991 groups in the 2026-09-08 run).
+  standard x abbreviation     -> standard side wins unless the abbreviation is
+                                 supported; context-aware already (pig, MRSA, let).
+  abbreviation x abbreviation -> only supported ids survive (COP).
+Trap: acronyms the source ontology did not tag as ABBREVIATION sit in the standard
+files and beat tagged ones. cl.syn has PD (pyloric dilator neuron, CL_4070015),
+LC, FS, ICC, cDC as plain synonyms; an article that says "PD" without spelling
+out Parkinson's disease resolves the mention to the crustacean neuron.
+
+DECISION 1 -- EMIT ONE HIT PER TYPE (covers cl x bto, pw x go, polysemy).
+  A same-span group holding several entity types is split by type; each part goes
+  through the existing single-type resolution (exact / article support / LCA).
+  AMBIGUOUS_ENTITY_TYPE disappears; give split groups their own status so the
+  count can be reported.
+  Why not exclude BTO's cell types instead: exclusion by collision with cl.syn
+  removes 258 BTO nodes, but 82 of them have 167 descendants that stay (e.g.
+  pluripotent stem cell -> adult stem cell, hematopoietic cell -> T-lymphoblast),
+  so LCA fallback and propagation still reach excluded nodes, and many surviving
+  descendants are cell types that simply share no string with CL (T-lymphoblast,
+  astroglial cell). The hard rule is leaky and adds patches to LCA and
+  propagation. Why not hand-curated owners for polysemy: every ontology release
+  can add collisions, which would block automated refreshes.
+  Justification for cl x bto: BTO's own top term is BTO:0000000 "tissues, cell
+  types and enzyme sources" -- cell types are in BTO's scope by design, so a cell
+  type appearing in both facets reflects the ontologies, not a modification.
+  EXCEPTION -- groups containing a MIR hit keep today's behaviour
+  (_prefer_contextual_mir). Every association hangs off a miRNA; a false MIR hit
+  ("bantam" without miRNA context) costs more than a false term hit.
+  CONSTRAINT -- no score may sum associations across term types. One mention can
+  now back associations in two facets.
+
+DECISION 2 -- FLAG, DON'T EXCLUDE, CROSS-ONTOLOGY CELL TYPES.
+  Expected cost of decision 1: the CL terms that collide with BTO carried 67% of
+  CELL associations in the 2026-09-11 build (104,160 of 155,172), so TISSUE
+  rankings would be topped by fibroblast/neuron/endothelial cell. At DB build,
+  compute a flag on TISSUE entities that share a surface form with a CL entity
+  (computed, never curated). UI hides flagged terms in the TISSUE facet by
+  default; evaluation reports tissue results with and without them.
+
+DECISION 3 -- ACRONYM SHAPE HEURISTIC AT EXTRACTION.
+  A synonym tagged ABBREVIATION by the source ontology goes to the abbreviation
+  file as today. Otherwise, if its DICTIONARY string (text casing never reaches
+  us; syngrep is case-insensitive) has no whitespace, length <= N, >= 2 uppercase
+  letters and uppercase >= half of its letters, it also goes to the abbreviation
+  file. Same rule for every ontology. Removes the untagged-acronym collisions
+  (PD, LC, FS, ICC, cDC, MAD) without curation.
+  Flagged in the current standard files:
+    N=5: disease 128, CL 80, GO 38, PW 0   (IDDM, SSc, AFib, NSC, PMN, RBC, EMT,
+                                             BER, NER, MMR, NHEJ)
+    N=8: disease 244, CL 98, GO 45, PW 0   (+ CMS-TA, CFU-EM, TC-NER, OXPHOS)
+  Mixed-case forms (VFib, EndMT, cvEDS) are flagged on purpose.
+  COST IS RECALL: a reclassified synonym only survives where the article supports
+  it (full name elsewhere, or an inferred "(EMT)" definition). GO's abbreviation
+  file is empty today, so EMT/NHEJ/OXPHOS are currently exact matches.
+  OPEN: choose N from the per-synonym group-status counts the processor already
+  logs (EXACT_MATCH -> RESOLVED/FAILURE for flagged strings) in the next run.
+
+DECISION 4 -- COLLISION MATRIX IS A REPORT, NOT A GATE.
+  refresh_data.py logs the matrix and the collisions new since the last refresh.
+  It never fails on them.
+
+OPEN -- MONDO SYNONYM ERRORS (disease x bto_NEW).
+  Not a collision problem: MONDO lists organs as exact synonyms of inflammation
+  terms (epididymitis <- epididymis, hypophysitis <- hypophysis, panniculitis <-
+  Subcutaneous tissue, ...). They create wrong disease hits with or without BTO,
+  and decision 1 does not fix the disease hit. 6-8 strings. Either document, or
+  add an automatic rule "drop a DISEASE synonym identical to a TISSUE term name"
+  (DISEASE extraction then depends on bto.syn).
+
+REJECTED: single global type order (SIV and anthrax are one pair with opposite
+answers); hand-curated owner tables (block automation); hard exclusion of BTO
+cell types (leaky, see decision 1); context-based type disambiguation (needs an
+annotated evaluation set); status quo (losses are invisible in the outputs and
+concentrate on high-value terms, e.g. Wnt signaling pathway 29,728).
+
+================================================================================
+14. STATUS -- 2026-09-15: PROPAGATION AND DISAMBIGUATION IMPLEMENTED, RERUN PENDING
+================================================================================
+
+Snapshot of where the work stands before the next extraction. Also amends where
+the IC threshold of 13.1 is applied (14.4).
+
+14.1 IMPLEMENTED AND TESTED
+---------------------------
+  - Root restriction of ontology graphs (13.1). Caches record their roots.
+  - Evidence propagation (5.2): per co-occurrence, direct record_cooccurrence_score
+    calls, no synthetic CoOccurences. EvidenceAggregator keeps a per-term lookup
+    table (term itself weight 1, ancestors with IC-ratio decay, decay <= 0 skipped)
+    and uses dict.get, not setdefault. Synthetic benchmark on MONDO: 31.6 -> ~14
+    us per co-occurrence. Scores identical to the uncached version.
+  - Propagation switch: EvidenceAggregator(..., propagate=False) and
+    run_from_normalized_output(..., propagate=False) build the direct-only
+    ablation without loading any graph. Re-aggregation loads graphs only for
+    association target types (not MIR, not TAXON) and sets up logging first.
+  - Multi-type disambiguation (13.4 decision 1, DISAMBIGUATION_DESIGN.md):
+    types and parts from filtered hits, support checked per type, MIR groups not
+    split, statuses RESOLVED_MULTI_TYPE / PARTIALLY_RESOLVED, RESOLVED_STATUSES
+    used by resolution_rate and the synonym counters, emitted-hits-per-group
+    counter in the summary.
+  - Tests: tests/test_resolve_groups.py (25), tests/test_evidence_propagation.py
+    (21). Run: python -m unittest discover -s tests -v
+
+14.2 MEASURED
+-------------
+  - Propagation growth on the first 400k lines of full_run.norm (all seven entity
+    configs): 18,815 direct-only associations -> 104,322 with propagation, 5.5x.
+    8.3 estimated 10-20x. Confirm on the sample run before planning DB size.
+  - Timings of the last runs:
+      extraction 2026-09-08   syngrep 6 min 48 s; resolution + normalization +
+                              co-occurrence + aggregation (one stream) 80 min 53 s;
+                              total 1 h 27 min 41 s
+      DB build 2026-09-11     16 min 20 s (corpus 8 min 01 s, mention layer
+                              4 min 39 s, article metadata 3 min 04 s)
+  - Per-hit IC (HitScorer, NormalizedHit.score, .norm `score` column) is never
+    read downstream and was computed on the UNRESTRICTED graphs (IC(disease) =
+    0.649 in the current .norm). ~1 us per hit, ~2 min per full run; the log is
+    <10% of that. Plan: drop it from normalization; compute IC once per term into
+    entity at DB build.
+  - Unknown terms: every term in full_run.assoc exists in its restricted graph
+    (GO 4,324, DISEASE 3,455, CELL 665, PW 245, TISSUE 73). map_to_index cannot
+    fail in a live run (all ids come from the same graph); it can when re-
+    aggregating an old .norm after an ontology change. See 14.5.
+
+14.3 DB SIZE OF GENERAL-TERM ASSOCIATIONS (atlas.db 2026-09-11, 1.88 GB)
+-----------------------------------------------------------------------
+Normalised structural IC (IC / log N) on the restricted graphs. "Sentences" =
+sentences backing ONLY associations below the cutoff.
+
+  cutoff  associations      evidence rows       sentences
+  0.05    38,425 (3.0%)     2.76M (15.4%)       229k (8.0%)
+  0.10    39,308 (3.0%)     2.76M (15.4%)       230k (8.1%)
+  0.15    40,018 (3.1%)     2.76M (15.4%)       230k (8.1%)
+  0.20    61,098 (4.7%)     3.92M (21.9%)       323k (11.3%)
+  0.25    85,544 (6.6%)     4.27M (23.8%)       363k (12.7%)
+
+Bytes, from dbstat (association_evidence + ix_ae_assoc 804 MB for 17.9M rows;
+sentence + its indexes 740 MB): cutoff 0.10 ~185 MB (~10% of the file), cutoff
+0.20 ~260 MB (~14%).
+
+The weight is DIRECT evidence on ubiquitous words mapped to roots:
+  cell (CL, 0.00) 1.72M rows, neoplasm (0.19) 1.07M, disease (0.00) 533k,
+  pathway (0.00) 499k, signaling pathway (0.21) 195k, metabolic process (0.17)
+  53k, neuron (0.17) 24k.
+Propagated associations have no evidence rows (5.2), so general-term
+associations created by propagation cost one association row each.
+
+Caveat: this build predates the BTO fix and the multi-type split.
+
+14.4 IC THRESHOLD -- WHERE IT IS APPLIED (amends 13.1)
+------------------------------------------------------
+DECISION: filter at DB LOAD. Not at hit / normalization level, not only at query
+time.
+  At build: associations (direct and propagated) whose term is below the cutoff
+  are not loaded, their association_evidence rows are skipped, and only
+  still-referenced sentences are inserted. entity and ontology_closure rows for
+  general terms are kept, so query expansion from a general term's page still
+  works. The cutoff is recorded in build provenance. Changing it costs a DB
+  rebuild (~16 min), not a re-extraction.
+Why not at hit level (the original idea behind keeping NormalizedHit.score):
+  - For surviving associations the scores WOULD be identical (a hit below the
+    cutoff only feeds terms that are even more general), but
+  - ENTITIES_PER_SENTENCE_CAP counts distinct spans over all normalized hits in
+    Grouper.extract_cooccurrences; removing general hits first changes which
+    sentences pass the cap and therefore the scores of specific terms;
+  - every cutoff would need a full re-extraction (~81 min), and the cutoff is
+    meant to be chosen from the distribution of associated terms, which does not
+    exist yet at hit level;
+  - filtered hits vanish from .norm (12.4 junk analysis, recall checks);
+  - the per-hit IC is stale anyway (14.2).
+Why not only at query time: ~10% of the file is direct evidence on root-level
+terms (14.3).
+Observations for choosing the cutoff:
+  - Natural gap: below 0.05 is roots only, 0.05-0.15 adds almost nothing
+    (38.4k -> 40.0k associations). Any cutoff in that range means "remove roots"
+    and is insensitive to the exact value.
+  - Above 0.15 terms that are not obviously uninformative start to go: neoplasm
+    0.19, neuron 0.17, epithelial cell 0.19. CL values are low overall, so a single
+    global cutoff may treat ontologies differently. OPEN: global vs per-ontology.
+
+14.5 NOT DONE -- BLOCKS THE RERUN
+---------------------------------
+  - BTO: ONTOLOGY_ROOTS[TISSUE] still the four old roots; relationship is still a
+    single string (needs {is_a, part_of} for BTO, 13.2).
+  - Acronym-shape rule (13.4 decision 3) not implemented.
+  - refresh_data.py not run since root restriction: every graph load re-parses
+    the OBO; synonym files date from 2026-08-26.
+  - PATHWAY orphans (103 terms, 13.1): roots=None or add orphan roots.
+  - MONDO anatomy-as-disease synonyms (13.4 OPEN): document or automatic rule.
+  - Sample run on CORPUS_SAMPLE_SMALLER before the full run: group statuses vs
+    the 2026-09-08 log, no BFO ancestors, propagation growth, timing.
+
+14.6 NOT DONE -- AFTER EXTRACTION
+---------------------------------
+  - IC per term into entity (structural; corpus IC still undecided) and the
+    load-time cutoff (14.4).
+  - "Also a CL term" flag on TISSUE entities (13.4 decision 2).
+  - Provenance: sidecar next to .norm with ontology source_hash / root_ids /
+    relationship per type, checked by run_from_normalized_output; propagate flag
+    and cutoff recorded next to .assoc and in the DB build.
+  - read_cooccurrences_tsv docstring still claims article_epoch is unused; the
+    aggregator buckets by it, so aggregating a read-back .cooc would put the whole
+    corpus into one article bucket.
+  - EvidenceAggregator: unreachable `if base_ic else 1` fallback can go.
+  - section_weigth() still returns 1; token-distance decay not started.
+  - HMDD not loaded into external_association; no ablation result yet.
+  - Out-of-date text: DATABASE_IMPLEMENTATION_PLAN.md Stage 4 (flush-point
+    propagation, split score columns, "root falls out at weight 0"); this file
+    5.4, 8.3 score split, 6 and 8.8 summary lines.

@@ -126,12 +126,20 @@ it), sequenced by `db/build_db.py`:
       final per-table row-count summary. Paths for `assoc_path`/`coocs_path` derive from a
       single `output_name` variable (currently `'mirna_and_disease'`) rather than being
       hardcoded separately — swap one line once the full-entity-type run exists.
-- [ ] `obsolete` still hardcoded `0` for every miRNA row — accepted, `load_mirbase`'s
-      source TSVs carry no dead/obsolete signal.
-- [ ] `mention_timeline`/`association_timeline` — **not built.** The `article.year` gap
-      that blocked them (§8.6) is closed, but these are derived aggregate tables (COUNT
-      DISTINCT article per year, joined through `association_evidence` → `sentence` →
-      `article`), not something `build_db.py` loads from a source file. Own work item.
+- [x] `obsolete` — **closed.** `load_mirbase`'s TSVs carry no dead signal but
+      `mirna_{mature,precursor}_history.tsv` do; `loaders/mirna_history.py` supplies it and
+      also inserts the 1,324 accessions that appear only in history (design notes §11.4).
+      Side effect: that recovered 4,760 associations `load_associations` had been dropping
+      because their miRNA accession was missing from `entity`.
+- [x] Timelines — **built, but not as the two tables §8.3 proposed.** Association
+      timelines are derived at query time (`association_evidence` → `sentence` → `article`,
+      now indexed). miRNA timelines could *not* be: `association_evidence` only covers
+      sentences that produced a co-occurrence, so it answers "how often was this miRNA
+      annotated", not "mentioned". `loaders/mentions.py` adds `mir_mention_article`
+      (3,694,133 `(mir_key, article_id)` pairs, one 92s duckdb pass over the 19GB `.norm`)
+      plus `corpus_year`. See design notes §11.1/§11.2 — and note that timelines **must**
+      be normalised by `corpus_year`: the corpus is 99% post-2010, so raw counts peak in
+      2021-22 for 20 of the 20 most-studied human miRNAs.
 - [ ] `external_association` (HMDD etc.) — not started, Stage 5 territory.
 
 **3d — Validation** (`validate.py`) — not started.
@@ -180,6 +188,31 @@ this update (regenerating `.cooc`/`.assoc` with the entities-per-sentence cap an
 
 ---
 
+## Stage 6 — User interface — DONE
+
+Built against `atlas.db`; design rationale and the five findings that shaped it are in
+design notes §11. FastAPI + Jinja, server-rendered, read-only immutable connection.
+
+- [x] **Schema additions** — `mir_mention_article`, `corpus_year`, `mirna_name_history`,
+      `search_name`, `entity.organism`, and six indexes. `ix_ae_assoc` must be
+      `(association_id, sentence_id)`: the single-column form costs 2.9s per evidence page
+      against 0.017s (§11.5).
+- [x] **Two views** — miRNA-centric (`/mirna/{accession}`: research score, normalised
+      timeline, filterable association list) and entity-centric (`/term/{accession}`:
+      closure-expanded miRNA list, `MAX` never `SUM`, "matched via" shown).
+- [x] **Evidence inspection** — `/association/{id}`, paginated by distinct sentence
+      (the largest association has 23,810 rows over 16,228 sentences), miRNA and term
+      spans highlighted. miRNA spans are extended at render time; the stored span is the
+      3-character stem (§11.7).
+- [x] **ID-conflict view** — `/name/{name}` for the 218 ambiguous miRBase identifiers,
+      which exist nowhere else in the database (§11.3).
+- [x] **Search** — names, synonyms, legacy miRBase names and accessions, restricted to
+      reachable entities so the 2.85M TAXON rows stay out.
+- [x] **Verification** — `scripts/web/verify_ui.py`, 22 checks.
+- [ ] **Not built:** synonym feedback loop (see Still open).
+
+---
+
 ## Stage 5 — Evaluation support
 
 - [ ] **Load HMDD into `external_association`** — separate table, never merged (§3b).
@@ -215,13 +248,22 @@ Stages 0-2 done apart from the rebuild-vs-inline equivalence check. Stage 3a-3c 
 - **Is a standalone downloadable resource file wanted for the thesis deliverable?** Still
   the one open question that decides one file vs. two, not engineering — ask the
   supervisor. Design notes §9.4 says how to revive the §8 two-file split if needed.
-- **miRNA synonyms** — no literal (non-regex) source identified yet; `mir_regex.syn` is
-  patterns, not surface forms. Still skipped in `loaders/synonym.py`.
+  `atlas.db` is now 2.4GB (was 1.7GB) after indexes and the mention layer.
+- **Synonym feedback loop** — named as a work package in `thesis_instructions.txt`,
+  deliberately not in the UI's v1. It is the only feature that would make the database
+  writable; confirm the omission with the supervisor.
+- **Research score weights are provisional** — the volume/breadth weighting is not
+  validated. Correlate against HMDD entry count per miRNA (Stage 5) before reporting it.
+- ~~miRNA synonyms~~ — **closed.** The miRBase history TSVs are literal surface forms:
+  8,421 mature and 1,329 precursor accessions have carried more than one name. 9,970 legacy
+  synonyms now load, so `hsa-miR-34b*` finds `MIMAT0000685`. The 218 genuinely ambiguous
+  names are withheld and routed to a disambiguation view instead (design notes §11.3/§11.4).
 - **`section_weigth()` is still `return 1`** (scoring.py:21) — every score currently
   produced is an unweighted co-occurrence count under a per-article log. Fine as a thin
   slice; not a result to report yet.
-- **`build_db.py` is untested against a real full corpus run** — written and reviewed, but
-  the `mirna_and_disease` re-extraction it needs is still in progress as of this update.
+- ~~`build_db.py` untested at full scale~~ — **closed.** Run end to end against
+  `full_run` on 2026-09-09 (~16 min): 1,300,530 associations, 17,936,913 evidence rows,
+  3,694,133 mention pairs, 320,963 articles. `scripts/web/verify_ui.py` checks the result.
 - ~~miRNA<->miRNA edges~~ — closed: bipartite only, see design notes §7.1.
 - ~~Postgres vs SQLite~~ — closed: SQLite, see design notes §7.3.
 - ~~One file vs. two~~ — settled for now: one file (§9). Revisit per §9.4 if triggered.
