@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pager %}
+{% from "_timeline.html" import timeline %}
+{% block title %}{{ entity.primary_name }} &middot; miRNA knowledgebase{% endblock %}
+{% block content %}
+<h1>{{ entity.primary_name }}</h1>
+<p class="ids">
+  <code>{{ entity.accession }}</code>
+  <span class="badge">{{ entity.reference_level }}</span>
+  {% if entity.organism %}<span class="badge subtle">{{ entity.organism }}</span>{% endif %}
+  {% if entity.obsolete %}<span class="badge warn">obsolete in miRBase</span>{% endif %}
+</p>
+
+{% if conflicts %}
+<div class="notice">
+  This accession has carried an ambiguous miRBase identifier:
+  {% for name in conflicts %}<a href="/name/{{ name }}">{{ name }}</a>{{ ", " if not loop.last }}{% endfor %}.
+  Mentions of that name cannot be attributed to a single accession.
+</div>
+{% endif %}
+
+<section class="score">
+  <div class="stat"><span class="value">{{ '%.2f'|format(score.score) }}</span><span class="label">research score</span></div>
+  <div class="stat"><span class="value">{{ '{:,}'.format(score.n_articles) }}</span><span class="label">articles mentioning</span></div>
+  <div class="stat"><span class="value">{{ '{:,}'.format(score.breadth) }}</span><span class="label">associated terms</span></div>
+  <p class="muted">
+    Research <em>attention</em>, not how well characterised this miRNA is: a popularity index,
+    topped by miR-21, miR-155 and let-7. Volume is summed as share of corpus per year rather than
+    raw article count, so it is not inflated by the corpus&rsquo;s bias toward recent years.
+    Component weights are provisional and still need validating against HMDD.
+  </p>
+</section>
+
+<h2>Research timeline</h2>
+{{ timeline('mir-timeline', '/api/mirna/' ~ entity.accession ~ '/timeline', entity.primary_name,
+            '/mirna/' ~ entity.accession ~ '/year/') }}
+
+<h2>Associations</h2>
+<nav class="filters">
+  <a href="?{% if selected_type %}{% endif %}" class="{{ 'on' if not selected_type }}">All
+    ({{ '{:,}'.format(counts.values()|sum) }})</a>
+  {% for t in term_types %}{% if counts.get(t) %}
+    <a href="?type={{ t }}" class="{{ 'on' if selected_type == t }}">
+      {{ t|lower|replace('_',' ') }} ({{ '{:,}'.format(counts[t]) }})</a>
+  {% endif %}{% endfor %}
+</nav>
+
+{% if associations['items'] %}
+<table class="rows">
+  <thead><tr><th>Term</th><th>Type</th><th class="num">Score</th></tr></thead>
+  <tbody>
+  {% for a in associations['items'] %}
+    <tr>
+      <td><a href="/association/{{ a.id }}">{{ a.term_name }}</a>
+          <code class="muted">{{ a.term_accession }}</code></td>
+      <td>{{ a.term_type|lower|replace('_',' ') }}</td>
+      <td class="num">{{ '%.2f'|format(a.score) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{{ pager(associations, '?' ~ ('type=' ~ selected_type ~ '&' if selected_type else '')) }}
+{% else %}
+<p class="empty">No associations{{ ' of this type' if selected_type }} for this miRNA.</p>
+{% endif %}
+{% endblock %}

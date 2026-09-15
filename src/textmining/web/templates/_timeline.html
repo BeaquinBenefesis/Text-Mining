@@ -1,0 +1,12 @@
+{% macro timeline(canvas_id, api_url, label, link_base=None) %}
+<figure class="timeline">
+  <canvas id="{{ canvas_id }}" height="110"
+          data-src="{{ api_url }}" data-label="{{ label }}"
+          {% if link_base %}data-link="{{ link_base }}"{% endif %}></canvas>
+  <figcaption>
+    Bars: articles per year (raw). Line: share of that year&rsquo;s corpus.
+    <strong>Read the line.</strong> The corpus is 99&percnt; post-2010 and 46&percnt; post-2020,
+    so raw counts largely track corpus coverage rather than research activity.
+  </figcaption>
+</figure>
+{% endmacro %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pager %}
+{% from "_timeline.html" import timeline %}
+{% block title %}{{ association.mirna_name }} &ndash; {{ association.term_name }}{% endblock %}
+{% block content %}
+<h1><a href="/mirna/{{ association.mirna_accession }}">{{ association.mirna_name }}</a>
+    <span class="muted">&mdash;</span>
+    <a href="/term/{{ association.term_accession }}">{{ association.term_name }}</a></h1>
+<p class="ids">
+  <code>{{ association.mirna_accession }}</code> &middot; <code>{{ association.term_accession }}</code>
+  <span class="badge">{{ association.term_type|lower|replace('_',' ') }}</span>
+  <span class="badge subtle">score {{ '%.2f'|format(association.score) }}</span>
+</p>
+
+<h2>Evidence timeline</h2>
+{{ timeline('assoc-timeline', '/api/association/' ~ association.id ~ '/timeline', 'This association') }}
+<p class="muted">
+  Faint series: the overall research timeline of
+  <a href="/mirna/{{ association.mirna_accession }}">{{ association.mirna_name }}</a>, for context &mdash;
+  does this association track the miRNA&rsquo;s general attention, or is it a distinct wave?
+</p>
+
+<h2>Supporting sentences</h2>
+{% if evidence['items'] %}
+<ul class="evidence">
+  {% for card in evidence['items'] %}
+  <li>
+    <p class="sentence">{{ card.html|safe }}</p>
+    <p class="meta">
+      {% if card.external_id.startswith('PMC') %}
+        <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/{{ card.external_id }}/" rel="noopener">{{ card.external_id }}</a>
+      {% else %}
+        <a href="https://pubmed.ncbi.nlm.nih.gov/{{ card.external_id }}/" rel="noopener">PMID {{ card.external_id }}</a>
+      {% endif %}
+      {% if card.year %}&middot; {{ card.year }}{% endif %}
+      {% if card.journal %}&middot; <em>{{ card.journal }}</em>{% endif %}
+      &middot; <span class="muted">section {{ card.section_num }}</span>
+    </p>
+  </li>
+  {% endfor %}
+</ul>
+{{ pager(evidence, '?') }}
+<p class="muted small">
+  miRNA highlights are extended rightward from the stored span: the extraction regex matches only
+  the stem (<code>miR</code>) and the identifying digits are not stored. In enumerations such as
+  &ldquo;miR-21, 221 and 16&rdquo; several miRNAs share one span, so the highlight may show only the first.
+</p>
+{% else %}
+<p class="empty">No stored evidence sentences for this association.</p>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>window.__contextTimeline = "/api/mirna/{{ association.mirna_accession }}/timeline";</script>
+{% endblock %}

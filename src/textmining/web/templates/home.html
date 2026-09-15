@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+{% if results is none %}
+  <section class="hero">
+    <h1>Search the knowledgebase</h1>
+    <p>Look up a miRNA to see how much it has been studied and what it is associated with,
+       or look up a disease, tissue, cell type, pathway or biological process to see which
+       miRNAs are associated with it &mdash; including through its ontology descendants.</p>
+    <p class="muted">Names, synonyms, legacy miRBase names and accessions are all searchable.</p>
+  </section>
+{% elif not results %}
+  <p class="empty">Nothing matched &ldquo;{{ query }}&rdquo;.</p>
+{% else %}
+  <h1>Results for &ldquo;{{ query }}&rdquo;</h1>
+  <ul class="results">
+    {% for r in results %}
+    <li>
+      {% if r.kind == 'conflict' %}
+        <a class="name" href="/name/{{ r.display_name }}">{{ r.display_name }}</a>
+        <span class="badge warn">ambiguous identifier</span>
+        <p class="muted">Carried by more than one miRBase accession &mdash; not resolved.</p>
+      {% else %}
+        <a class="name" href="{{ '/mirna/' if r.entity_type == 'MIR' else '/term/' }}{{ r.accession }}">
+          {{ r.primary_name }}</a>
+        <span class="badge">{{ r.entity_type|lower|replace('_',' ') }}</span>
+        {% if r.reference_level %}<span class="badge subtle">{{ r.reference_level }}</span>{% endif %}
+        {% if r.organism %}<span class="badge subtle">{{ r.organism }}</span>{% endif %}
+        {% if r.obsolete %}<span class="badge warn">obsolete</span>{% endif %}
+        <p class="muted">{{ r.accession }}{% if r.display_name|lower != r.primary_name|lower %}
+          &middot; matched &ldquo;{{ r.display_name }}&rdquo;{% if r.kind == 'legacy' %} (former miRBase name){% endif %}
+        {% endif %}</p>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+{% endblock %}

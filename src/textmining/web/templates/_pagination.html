@@ -1,0 +1,12 @@
+{% macro pager(result, base_url) %}
+  {% set pages = (result.total // result.per_page) + (1 if result.total % result.per_page else 0) %}
+  {% if pages > 1 %}
+  <nav class="pager">
+    {% if result.page > 1 %}<a href="{{ base_url }}page={{ result.page - 1 }}">&larr; Previous</a>{% endif %}
+    <span>Page {{ result.page }} of {{ pages }} &middot; {{ '{:,}'.format(result.total) }} results</span>
+    {% if result.page < pages %}<a href="{{ base_url }}page={{ result.page + 1 }}">Next &rarr;</a>{% endif %}
+  </nav>
+  {% else %}
+  <nav class="pager"><span>{{ '{:,}'.format(result.total) }} result{{ '' if result.total == 1 else 's' }}</span></nav>
+  {% endif %}
+{% endmacro %}

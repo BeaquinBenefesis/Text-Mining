@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% from "_timeline.html" import timeline %}
+{% block title %}{{ conflict.name }} &middot; ambiguous identifier{% endblock %}
+{% block content %}
+<h1>{{ conflict.name }}</h1>
+{% if conflict.ambiguous %}
+<div class="notice warn">
+  <strong>This miRBase identifier is ambiguous.</strong>
+  More than one accession has carried this name across miRBase releases, so a mention of it in the
+  literature cannot be attributed to a single molecule. These mentions are therefore excluded from
+  the association data entirely &mdash; they are shown here and nowhere else.
+</div>
+{% endif %}
+
+<h2>Which accession carried this name</h2>
+<table class="rows">
+  <thead><tr><th>Accession</th><th>Level</th><th>miRBase releases</th><th>Current name</th></tr></thead>
+  <tbody>
+  {% for c in conflict.candidates %}
+    <tr>
+      <td><code>{{ c.accession }}</code></td>
+      <td>{{ c.reference_level }}</td>
+      <td>{{ c.first_version }}{% if c.last_version != c.first_version %} &ndash; {{ c.last_version }}{% endif %}</td>
+      <td>
+        {% if c.entity_id %}<a href="/mirna/{{ c.accession }}">{{ c.current_name }}</a>
+          {% if c.obsolete %}<span class="badge warn">obsolete</span>{% endif %}
+        {% else %}<span class="muted">not in this knowledgebase</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted">
+  The switchover is <em>not</em> used to reassign mentions. Publication year dates the paper, not the
+  miRBase release its authors were working from &mdash; pipelines lag releases and reviews inherit
+  legacy names from their sources &mdash; so dating a mention to one accession would be a guess with
+  no bound on its error.
+</p>
+
+{% if conflict.timeline %}
+<h2>Mentions of this name over time</h2>
+{{ timeline('conflict-timeline', '/api/mirna/' ~ conflict.name|lower ~ '/timeline', conflict.name) }}
+{% endif %}
+{% endblock %}

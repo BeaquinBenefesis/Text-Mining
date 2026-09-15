@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pager %}
+{% block title %}{{ entity.primary_name }} &middot; miRNA knowledgebase{% endblock %}
+{% block content %}
+<h1>{{ entity.primary_name }}</h1>
+<p class="ids"><code>{{ entity.accession }}</code>
+  <span class="badge">{{ entity.entity_type|lower|replace('_',' ') }}</span>
+  <span class="badge subtle">{{ entity.source }}</span></p>
+
+<form class="filters" method="get">
+  <label>Organism
+    <select name="organism" onchange="this.form.submit()">
+      <option value="" {{ 'selected' if not organism }}>all</option>
+      {% for o in organisms %}
+        <option value="{{ o.organism }}" {{ 'selected' if organism == o.organism }}>
+          {{ o.organism }} ({{ '{:,}'.format(o.n) }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="check">
+    <input type="checkbox" name="expand" value="true" {{ 'checked' if expand }} onchange="this.form.submit()">
+    include ontology descendants
+  </label>
+</form>
+
+{% if expand %}
+<div class="notice subtle">
+  Showing miRNAs associated with <strong>{{ entity.primary_name }}</strong> or any of its ontology
+  descendants. This is <em>query expansion</em> at retrieval time, not propagated scoring: each
+  miRNA is ranked by its single best matching association (<code>MAX</code>), never by summing
+  scores across subtypes, which would systematically favour broad terms.
+</div>
+{% endif %}
+
+{% if results['items'] %}
+<table class="rows">
+  <thead><tr><th>miRNA</th><th>Level</th><th class="num">Best score</th><th>Matched via</th></tr></thead>
+  <tbody>
+  {% for r in results['items'] %}
+    <tr>
+      <td><a href="/mirna/{{ r.mirna_accession }}">{{ r.mirna_name }}</a></td>
+      <td>{{ r.reference_level }}</td>
+      <td class="num"><a href="/association/{{ r.id }}">{{ '%.2f'|format(r.score) }}</a></td>
+      <td class="via">{{ r.via_terms }}{% if r.n_terms > 4 %} <span class="muted">+{{ r.n_terms - 4 }} more</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{{ pager(results, '?organism=' ~ (organism or '') ~ '&expand=' ~ ('true' if expand else 'false') ~ '&') }}
+{% else %}
+<p class="empty">No miRNAs associated with this term{{ ' for this organism' if organism }}.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ accession }} in {{ year }}{% endblock %}
+{% block content %}
+<h1>{{ entity.primary_name if entity else accession }} &middot; {{ year }}</h1>
+<p class="ids">{{ '{:,}'.format(articles|length) }} article{{ '' if articles|length == 1 else 's' }}
+  mentioning this miRNA{% if articles|length >= 200 %} (first 200){% endif %}
+  &middot; <a href="{{ '/mirna/' ~ accession if entity else '/name/' ~ accession }}">back</a></p>
+<ul class="articles">
+  {% for a in articles %}
+  <li>
+    {% if a.external_id.startswith('PMC') %}
+      <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/{{ a.external_id }}/" rel="noopener">{{ a.external_id }}</a>
+    {% else %}
+      <a href="https://pubmed.ncbi.nlm.nih.gov/{{ a.external_id }}/" rel="noopener">PMID {{ a.external_id }}</a>
+    {% endif %}
+    {% if a.journal %}<span class="muted">&middot; <em>{{ a.journal }}</em></span>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}
