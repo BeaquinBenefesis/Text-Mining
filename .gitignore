@@ -49,3 +49,5 @@ thesis_instructions.txt
 REVIEW.md
 CLAUDE.md
 .claude/
+# --- Database build output ---
+db/
