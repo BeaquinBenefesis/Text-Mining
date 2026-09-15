@@ -5,7 +5,7 @@ import shutil
 import glob
 import logging
 from typing import Iterator, Optional
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from textmining.enums import HitType, SynonymType, GroupStatus
@@ -118,8 +118,7 @@ class HitProcessor:
     # A group can hold candidates of different entity_types at the same span
     # (e.g. "bantam" the miRNA vs. "bantam" the chicken gene). If one of them is a
     # MIR hit with a well-formed prefix/suffix, prefer it over same-span
-    # candidates of other types rather than falling through to
-    # AMBIGUOUS_ENTITY_TYPE.
+    # candidates of other types
     def _prefer_contextual_mir(self, hits: list[CandidateHit]) -> list[CandidateHit]:
         if not self.mir_normalizer:
             return hits
@@ -140,7 +139,9 @@ class HitProcessor:
 
     def _resolve_groups(self, hit_groups: list[HitGroup], article_evidence: ArticleEvidence) -> list[CandidateHit]:
         resolved_hits = []
+        group_starts = []   # index into resolved_hits where each group's output begins
         for g in hit_groups:
+            group_starts.append(len(resolved_hits))
             if not g.is_ambiguous() and not g.contains_any_abbreviation():
                 g.group_status = GroupStatus.EXACT_MATCH
                 resolved_hits.append(g.get_first())
@@ -154,7 +155,8 @@ class HitProcessor:
             
             filtered_hits = None
             if g.contains_inferred_abbreviation():
-                # From abbreviation candidates (inferred and non-inferred ones), keep only the inferred abbreviations
+                # An in-text definition exists: drop dictionary abbreviations of every type.
+                # Standard and inferred hits of every type are kept.
                 filtered_hits = [h for h in g.hits if h.synonym_type != SynonymType.ABBREVIATION]
             elif g.contains_abbreviation():
                 filtered_hits = [h for h in g.hits 
@@ -178,44 +180,90 @@ class HitProcessor:
                 resolved_hits.append(hit)
                 g.group_status = GroupStatus.RESOLVED
                 continue
-            supported_ids = implied_ids & article_evidence.unambiguous_entity_ids
 
-            if len(supported_ids) == 1:
-                resolved_id = next(iter(supported_ids))
-                hit = next(h for h in filtered_hits if h.entity_id == resolved_id)
-                resolved_hits.append(hit)
-                g.group_status = GroupStatus.RESOLVED
-            else:
-                entity_type_set = g.entity_type_set()
-                if len(entity_type_set) != 1:
-                    logger.debug("Group AMBIGUOUS_ENTITY_TYPE: types=%s", entity_type_set)
-                    g.group_status = GroupStatus.AMBIGUOUS_ENTITY_TYPE
-                    continue
-                entity_type = next(iter(entity_type_set))
-                ontology = self.type_to_ontology.get(entity_type, None)
-                if not ontology:
-                    logger.warning("No ontology configured for entity_type=%s; leaving group AMBIGUOUS_ID", entity_type)
-                    g.group_status = GroupStatus.AMBIGUOUS_ID
-                    continue
-                lca = ontology.find_lca(*implied_ids)             
-                
-                if not lca:
-                    logger.debug("No LCA found for implied_ids=%s (type=%s)", implied_ids, entity_type)
-                    g.group_status = GroupStatus.AMBIGUOUS_ID
-                    continue
-                else:
-                    template = next(h for h in filtered_hits if h.entity_id in implied_ids)
-                    inferred_hit = template.copy(entity_id=lca)
-                    resolved_hits.append(inferred_hit)
+            entity_type_set = {h.entity_type for h in filtered_hits}
+            if HitType.MIR in entity_type_set:
+                supported = {h.entity_id for h in filtered_hits} & article_evidence.unambiguous_entity_ids
+                if len(supported) == 1:
+                    hit = next(h for h in filtered_hits if h.entity_id in supported)
+                    resolved_hits.append(hit)
                     g.group_status = GroupStatus.RESOLVED
-                    logger.debug("Resolved group via LCA: implied_ids=%s -> lca=%s", implied_ids, lca)
-        
+                else:
+                    logger.debug("Group AMBIGUOUS_ENTITY_TYPE: MIR collision without a single supported id, types=%s, supported=%s",
+                                 entity_type_set, supported)
+                    g.group_status = GroupStatus.AMBIGUOUS_ENTITY_TYPE
+                continue
+            
+            hits_by_type = defaultdict(list)
+            for h in filtered_hits:
+                hits_by_type[h.entity_type].append(h)
+            
+            
+            statuses = set()
+            accepted_types = []
+            for hits in hits_by_type.values():
+                hit, status = self._resolve_single_type(hits, article_evidence)
+                if hit is not None:
+                    resolved_hits.append(hit)
+                    accepted_types.append(hit.entity_type)
+                statuses.add(status)
+            
+            if len(statuses) == 1:
+                group_status = next(iter(statuses))
+                if group_status == GroupStatus.RESOLVED:
+                    if len(hits_by_type.keys()) == 1:
+                        g.group_status = GroupStatus.RESOLVED
+                    else:
+                        g.group_status = GroupStatus.RESOLVED_MULTI_TYPE
+                else:
+                    g.group_status = GroupStatus.AMBIGUOUS_ID
+            else:
+                g.group_status = GroupStatus.PARTIALLY_RESOLVED
+            logger.debug("Split group at %s: %d/%d type(s) accepted %s, ids per type %s -> %s",
+                         g.get_first().sort_key, len(accepted_types), len(hits_by_type),
+                         [t.name for t in accepted_types],
+                         {t.name: sorted({h.entity_id for h in hs}) for t, hs in hits_by_type.items()},
+                         g.group_status)
+            
+    
         # RECORDING
-        for g in hit_groups:
-            self.history.record_group(g)
+        group_ends = group_starts[1:] + [len(resolved_hits)]
+        for g, start, end in zip(hit_groups, group_starts, group_ends):
+            self.history.record_group(g, emitted_hits=end - start)
         for r in resolved_hits:
             self.history.record_output_hit(r)
         return resolved_hits
+    
+    def _resolve_single_type(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[Optional[CandidateHit], GroupStatus]:
+        ids = {h.entity_id for h in hits}
+        
+        if len(ids) == 1:
+            return next(h for h in hits if h.entity_id in ids), GroupStatus.RESOLVED
+        
+        supported = ids & evidence.unambiguous_entity_ids
+        
+        if len(supported) == 1:
+            return next(h for h in hits if h.entity_id in supported), GroupStatus.RESOLVED
+        
+        entity_type = hits[0].entity_type
+        ontology = self.type_to_ontology.get(entity_type, None)
+        
+        if not ontology:
+            logger.warning("No ontology configured for entity_type=%s; leaving part AMBIGUOUS_ID", entity_type)
+            return None, GroupStatus.AMBIGUOUS_ID
+        
+        lca = ontology.find_lca(*ids)
+        if lca is None:
+            logger.debug("No LCA found for ids=%s (type=%s)", ids, entity_type)
+            return None, GroupStatus.AMBIGUOUS_ID
+        
+        template = hits[0]
+        inferred_hit = template.copy(entity_id=lca)
+        logger.debug("Resolved part via LCA: ids=%s -> lca=%s (type=%s)", ids, lca, entity_type)
+        return inferred_hit, GroupStatus.RESOLVED
+        
+            
+        
                     
     @staticmethod
     def _collect_article_evidence(hit_groups: list[HitGroup]) -> ArticleEvidence:
@@ -429,6 +477,15 @@ class HitProcessor:
         return result_map
 
 
+# Statuses under which a group emitted at least one hit
+RESOLVED_STATUSES = (
+    GroupStatus.EXACT_MATCH,
+    GroupStatus.RESOLVED,
+    GroupStatus.RESOLVED_MULTI_TYPE,
+    GroupStatus.PARTIALLY_RESOLVED,
+)
+
+
 @dataclass
 class HitProcessorHistory:
     """Tracks stats across the raw-hit -> group -> resolved-hit pipeline in HitProcessor."""
@@ -442,12 +499,16 @@ class HitProcessorHistory:
 
     total_groups: int = 0
     multi_candidate_groups: int = 0          # groups that entered the disambiguation branch (ambiguous OR contains an abbreviation)
-    multi_candidate_resolved: int = 0        # of those, how many ended up RESOLVED
+    multi_candidate_resolved: int = 0        # of those, how many ended up resolved (see RESOLVED_STATUSES)
     group_size_counts: Counter = field(default_factory=Counter)   # {group size: number of groups}
     group_status_counts: Counter = field(default_factory=Counter) # {GroupStatus: count}
+    # {hits emitted by one group: number of groups}; > 1 only for split multi-type groups
+    emitted_hits_per_group_counts: Counter = field(default_factory=Counter)
 
     ambiguous_synonym_counts: Counter = field(default_factory=Counter)   # synonym -> times it produced an ambiguous group
     resolved_synonym_counts: Counter = field(default_factory=Counter)    # synonym -> times it resolved successfully
+    # synonym -> times its group was split and only some type parts resolved (also counted as resolved)
+    partially_resolved_synonym_counts: Counter = field(default_factory=Counter)
     # synonym -> times it stayed unresolved, broken out per GroupStatus (AMBIGUOUS_ENTITY_TYPE / AMBIGUOUS_ID / FAILURE)
     unresolved_synonym_counts_by_status: dict = field(
         default_factory=lambda: {
@@ -463,16 +524,18 @@ class HitProcessorHistory:
         self.input_entity_type_counts[hit.entity_type] += 1
         self.input_synonym_type_counts[hit.synonym_type] += 1
 
-    def record_group(self, group: HitGroup) -> None:
+    def record_group(self, group: HitGroup, emitted_hits: int) -> None:
         self.total_groups += 1
         group_size = len(group.hits)
         self.group_size_counts[group_size] += 1
         self.group_status_counts[group.group_status] += 1
+        self.emitted_hits_per_group_counts[emitted_hits] += 1
+        resolved = group.group_status in RESOLVED_STATUSES
 
         needs_disambiguation = group.is_ambiguous() or group.contains_any_abbreviation()
         if needs_disambiguation:
             self.multi_candidate_groups += 1
-            if group.group_status == GroupStatus.RESOLVED:
+            if resolved:
                 self.multi_candidate_resolved += 1
 
         synonym_key = self._synonym_key(group)
@@ -482,8 +545,10 @@ class HitProcessorHistory:
         if group.is_ambiguous():
             self.ambiguous_synonym_counts[synonym_key] += 1
 
-        if group.group_status in (GroupStatus.EXACT_MATCH, GroupStatus.RESOLVED):
+        if resolved:
             self.resolved_synonym_counts[synonym_key] += 1
+            if group.group_status == GroupStatus.PARTIALLY_RESOLVED:
+                self.partially_resolved_synonym_counts[synonym_key] += 1
         elif group.group_status in self.unresolved_synonym_counts_by_status:
             self.unresolved_synonym_counts_by_status[group.group_status][synonym_key] += 1
 
@@ -508,16 +573,16 @@ class HitProcessorHistory:
 
     @property
     def resolution_rate(self) -> float:
-        """Fraction of ALL groups that ended up resolved (EXACT_MATCH or RESOLVED)."""
+        """Fraction of ALL groups that ended up resolved (any of RESOLVED_STATUSES)."""
         if self.total_groups == 0:
             return 0.0
-        resolved = self.group_status_counts[GroupStatus.EXACT_MATCH] + self.group_status_counts[GroupStatus.RESOLVED]
+        resolved = sum(self.group_status_counts[status] for status in RESOLVED_STATUSES)
         return resolved / self.total_groups
 
     @property
     def multi_candidate_resolution_rate(self) -> float:
         """Fraction of groups that needed disambiguation (ambiguous or contained an
-        abbreviation) that ended up RESOLVED, as opposed to AMBIGUOUS/FAILURE."""
+        abbreviation) that ended up resolved, as opposed to AMBIGUOUS/FAILURE."""
         if self.multi_candidate_groups == 0:
             return 0.0
         return self.multi_candidate_resolved / self.multi_candidate_groups
@@ -528,6 +593,9 @@ class HitProcessorHistory:
 
     def top_resolved_synonyms(self, n: int = 10):
         return self.resolved_synonym_counts.most_common(n)
+
+    def top_partially_resolved_synonyms(self, n: int = 10):
+        return self.partially_resolved_synonym_counts.most_common(n)
 
     def top_unresolved_synonyms(self, n: int = 10, status: Optional[GroupStatus] = None):
         """Top unresolved synonyms. Pass a specific GroupStatus (e.g.
@@ -561,6 +629,11 @@ class HitProcessorHistory:
             emit(f"  size={size:<3}: {count}")
 
         emit()
+        emit("Emitted Hits per Group:")
+        for n_hits, count in sorted(self.emitted_hits_per_group_counts.items()):
+            emit(f"  hits={n_hits:<3}: {count}")
+
+        emit()
         emit("Input Hits by Entity Type:")
         for entity, count in self.input_entity_type_counts.items():
             emit(f"  {entity:<20}: {count}")
@@ -584,6 +657,13 @@ class HitProcessorHistory:
         emit(f"Top {top_n} Synonyms Successfully Resolved:")
         for synonym, count in self.top_resolved_synonyms(top_n):
             emit(f"  {synonym!r:<30}: {count}")
+
+        top_partial = self.top_partially_resolved_synonyms(top_n)
+        if top_partial:
+            emit()
+            emit(f"Top {top_n} Synonyms Partially Resolved (some type parts unresolved):")
+            for synonym, count in top_partial:
+                emit(f"  {synonym!r:<30}: {count}")
 
         emit()
         emit(f"Top {top_n} Synonyms Remaining Unresolved (all statuses):")
