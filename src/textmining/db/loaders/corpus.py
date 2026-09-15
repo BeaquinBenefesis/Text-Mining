@@ -26,6 +26,11 @@ def load_corpus(
     
     for cooc in coocs:
         mirna_accession, term_accession = cooc.normalized_ids
+
+        #TODO: remove this. Currently exception is raiseb because of dead mirnas.
+        if mirna_accession not in accession_to_id:
+            continue
+        
         assoc_id = assoc_ids[(accession_to_id[mirna_accession], accession_to_id[term_accession])]
 
         if cooc.sentence_id in sentence_ids:

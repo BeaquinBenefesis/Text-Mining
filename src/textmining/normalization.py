@@ -209,6 +209,13 @@ class MirIdMapper:
     def resolve_token(entity_id: str) -> str | None:
         return MirIdMapper._id_to_token.get(entity_id)
 
+    @staticmethod
+    def known_tokens() -> dict[str, str]:
+        """The full regex-id -> canonical-body map. Consumers that rebuild a
+        miRNA name outside the normalizer (the DB mention loader) need to
+        enumerate it rather than resolve one id at a time."""
+        return dict(MirIdMapper._id_to_token)
+
 
 def normalized_successfully(hit: NormalizedHit) -> bool:
     if not hit.normalization:

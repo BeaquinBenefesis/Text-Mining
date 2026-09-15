@@ -5,7 +5,7 @@ from pathlib import Path
 
 csv.field_size_limit(sys.maxsize)
 
-
+#TODO: check this is working as promised. I want to calculate the % of articles i can actually retrieve the date for
 def _year_from_pubdate(pubdate: str) -> int | None:
     year_str = pubdate[:4]
     return int(year_str) if year_str.isdigit() else None

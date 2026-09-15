@@ -17,7 +17,7 @@ def load_associations(con: sqlite3.Connection, associations_path: Path):
             'term_type': assoc.entity_types[1].value,
             'score': assoc.score,
         }
-        for assoc in associations   
+        for assoc in associations if accession_to_id.get(assoc.normalized_ids[0], None) #TODO: remove this. Currently this crashed due to dead mirnas
     )
     con.executemany("""INSERT INTO association 
                 (mirna_entity_id, term_entity_id, term_type, score) 

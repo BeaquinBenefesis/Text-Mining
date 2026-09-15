@@ -30,8 +30,13 @@ def open_for_build(path: Path = DB_PATH) -> sqlite3.Connection:
     logger.info("Schema applied: %d table(s)", n_tables)
     return con
 
-def open_readonly(path: Path = DB_PATH) -> sqlite3.Connection:
-    logger.info("Opening %s read-only", path)
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+def open_readonly(
+    path: Path = DB_PATH,
+    immutable: bool = False,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
+    uri = f"file:{path}?mode=ro" + ("&immutable=1" if immutable else "")
+    logger.info("Opening %s read-only%s", path, " (immutable)" if immutable else "")
+    con = sqlite3.connect(uri, uri=True, check_same_thread=check_same_thread)
     _configure(con)
     return con

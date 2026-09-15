@@ -11,6 +11,7 @@ from textmining.enums import HitType, SynonymType, NormalizationStatus, Normaliz
 
 NORM_FIELDNAMES = [
     "sentence_id",
+    "origin_file_name",
     "entity_type",
     "synonym_type",
     "synonym_id",
@@ -96,10 +97,7 @@ def write_cooccurrences_tsv(cooccurrences: Iterable[CoOccurence], output_path: P
 
 
 def read_cooccurrences_tsv(input_path: Path) -> Iterator[CoOccurence]:
-    """Reads a .cooc file back into CoOccurence objects. article_epoch is not
-    persisted (it's a live-run-only bookkeeping value for ArticleStreamGuard,
-    meaningless once reloaded), so it's stamped as 0 here -- callers reading
-    this back are past the aggregation stage and never use it."""
+    """Reads a .cooc file back into CoOccurence objects."""
     with input_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
@@ -147,6 +145,7 @@ def _row_to_normalized_hit(row: dict) -> NormalizedHit:
         entity_type=HitType[row["entity_type"]] if row["entity_type"] else None,
         synonym_type=SynonymType[row["synonym_type"]] if row["synonym_type"] else None,
         sentence_id=row["sentence_id"],
+        origin_file_name=_as_str(row.get("origin_file_name")),
         entity_id=row["entity_id"],
         raw_text=row["raw_text"],
         start_position=_as_int(row["start_position"]),
