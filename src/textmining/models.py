@@ -100,7 +100,7 @@ class CoOccurence:
 @dataclass
 class AssociationEvidence:
     """
-    Per-article saturating evidence
+    Per-article saturation evidence
     """
 
     _current_article_epoch: int = -1
@@ -108,28 +108,35 @@ class AssociationEvidence:
     _current_article_sum: float = 0.0
     _corpus_sum: float = 0.0
 
-    def record_cooccurrence(self, cooccurrence: CoOccurence):
-        if cooccurrence.article_epoch < self._current_article_epoch:
-            raise ValueError(
-                f'Reordered article stream: epoch {cooccurrence.article_epoch} '
-                f'({cooccurrence.article_id}) follows epoch {self._current_article_epoch} '
-                f'({self._current_article_id})'
-            )
-        if cooccurrence.article_epoch != self._current_article_epoch:
-            self._flush_article_evidence()
-            self._current_article_epoch = cooccurrence.article_epoch
-            self._current_article_id = cooccurrence.article_id
-        self._current_article_sum += cooccurrence.score
 
+    def record_cooccurrence_score(self, article_epoch, article_id, cooc_score):
+        self._check_epoch(article_epoch, article_id)
+        self._attempt_flush(article_epoch, article_id)
+        self._current_article_sum += cooc_score
+        
+    def _attempt_flush(self, article_epoch, article_id):
+        if article_epoch != self._current_article_epoch:
+            self._flush_article_evidence()
+            self._current_article_epoch = article_epoch
+            self._current_article_id = article_id
+        
     def _flush_article_evidence(self):
         if self._current_article_epoch >= 0:
             self._corpus_sum += log2(1 + self._current_article_sum)
         self._current_article_sum = 0.0
     
+    def _check_epoch(self, article_epoch, article_id):
+        if article_epoch < self._current_article_epoch:
+            raise ValueError(
+                f'Reordered article stream: epoch {article_epoch} '
+                f'({article_id}) follows epoch {self._current_article_epoch} '
+                f'({self._current_article_id})'
+            )
     @property
     def score(self):
         pending = log2(1 + self._current_article_sum)
         return log2(1 + self._corpus_sum + pending)
+    
 
 
 @dataclass
@@ -138,8 +145,8 @@ class Association:
     entity_types: tuple[HitType, HitType]
     evidence: AssociationEvidence = field(default_factory=lambda: AssociationEvidence())
 
-    def record_cooccurrence(self, cooccurrence: CoOccurence):
-        self.evidence.record_cooccurrence(cooccurrence)
+    def record_cooccurrence_score(self, article_epoch, article_id, cooc_score):
+        self.evidence.record_cooccurrence_score(article_epoch, article_id, cooc_score)
     
     @property
     def score(self):
@@ -174,6 +181,7 @@ class NormalizedHit(CandidateHit):
     def to_dict(self) -> dict:
         return {
             "sentence_id": self.sentence_id,
+            "origin_file_name": self.origin_file_name,
             "entity_type": self.entity_type.name if self.entity_type else None,
             "synonym_type": self.synonym_type.name if self.synonym_type else None,
             "synonym_id": self.synonym_id,

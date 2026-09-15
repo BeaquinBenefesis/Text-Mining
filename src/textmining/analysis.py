@@ -1,8 +1,10 @@
 import logging
 from typing import Iterator, Optional
+from collections import defaultdict
 from itertools import groupby, combinations
 from textmining.models import CandidateHit, NormalizedHit, HitType, Association, CoOccurence
 from textmining.normalization import normalized_successfully
+from textmining.ontology import OntologyGraph, to_internal_id, to_external_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +91,7 @@ class Grouper:
     
     @staticmethod
     def valid_types(type_a: HitType, type_b: HitType) -> bool:
-        return (type_a != type_b) and (type_a == HitType.MIR or type_b == HitType.MIR)
+        return (type_a != type_b) and HitType.MIR in (type_a, type_b) and HitType.TAXON not in (type_a, type_b)
     
     @staticmethod
     def extract_valid_combinations(sentence_hits: list[NormalizedHit]) -> Iterator[tuple[NormalizedHit, NormalizedHit]]:
@@ -110,11 +112,6 @@ class Grouper:
         for sentence_id, sentence_hits in Grouper.group_by_sentence(guard.validate(hits)):
             if len(sentence_hits) < 2:
                 continue
-            # Count distinct (start, length) spans, not raw hit rows: one literal
-            # mention can produce several NormalizedHits (e.g. a species-ambiguous
-            # miRNA mention resolves to one row per surviving taxon prefix), which
-            # would otherwise inflate this count without adding real distinct
-            # mentions.
             distinct_spans = {(h.start_position, h.hit_length) for h in sentence_hits}
             if len(distinct_spans) > ENTITIES_PER_SENTENCE_CAP:
                 continue
@@ -132,12 +129,44 @@ class Grouper:
 
 class EvidenceAggregator:
     
-    def __init__(self):
+    def __init__(self, type_to_ontology: dict[HitType, OntologyGraph], propagate: bool = True):
+        """propagate=False records direct evidence only (the ablation build); no graph is
+        consulted then, so type_to_ontology may be empty."""
         self.associations: dict[tuple[str, str], Association] = {}
+        self.type_to_ontology: dict[HitType, OntologyGraph] = type_to_ontology
+        self.propagate = propagate
+        self._cache = {}
+
     def record_coccurrence(self, cooc: CoOccurence) -> None:
-        assoc = self.associations.setdefault(
-            cooc.normalized_ids,
-            Association(normalized_ids=cooc.normalized_ids,
-                        entity_types=cooc.entity_types,)
-        )
-        assoc.record_cooccurrence(cooc)
+        term_entity_type = cooc.entity_types[1]
+        mir_acc, term_acc = cooc.normalized_ids
+        
+        cached = self._cache.get((term_acc, term_entity_type), None)
+
+        if cached is None and not self.propagate:
+            cached = [(term_acc, 1)]
+            self._cache[(term_acc, term_entity_type)] = cached
+        elif cached is None:
+            graph = self.type_to_ontology[term_entity_type]
+            descendant_idx = graph.map_to_index(to_internal_id(term_acc))
+            
+            base_ic = graph.compute_ic_from_index(descendant_idx)
+            cached = [(term_acc, 1)]
+            for ancestor_idx in graph.ancestors(descendant_idx):
+                ancestor_ic = graph.compute_ic_from_index(ancestor_idx)
+                decay_factor = ancestor_ic / base_ic
+                if decay_factor <= 0:
+                    continue
+                ancestor_acc = graph.map_idx_to_external_id(ancestor_idx)
+                cached.append((ancestor_acc, decay_factor))
+            self._cache[(term_acc, term_entity_type)] = cached
+        
+        cooc_score = cooc.score
+        for ancestor_acc, decay_factor in cached:
+            key = (mir_acc, ancestor_acc)
+            assoc = self.associations.get(key, None)
+            if assoc is None:
+                assoc = Association(key,
+                                    entity_types=cooc.entity_types)
+                self.associations[key] = assoc
+            assoc.record_cooccurrence_score(cooc.article_epoch, cooc.article_id, cooc_score * decay_factor)

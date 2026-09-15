@@ -93,7 +93,7 @@ def process_hits(output_name : str,
     cooccurrences = Grouper.extract_cooccurrences(_successfully_normalized(hits))
     cooccurrences = write_cooccurrences_tsv(cooccurrences, output_dir / f'{output_name}.cooc')
 
-    aggregator = _aggregate_associations(cooccurrences)
+    aggregator = _aggregate_associations(cooccurrences, type_to_ontology)
     write_associations_tsv(aggregator.associations.values(), output_dir / f'{output_name}.assoc')
     return aggregator
 
@@ -103,16 +103,19 @@ def _successfully_normalized(hits: Iterator[NormalizedHit]) -> Iterator[Normaliz
     return (h for h in hits if normalized_successfully(h))
 
 
-def _aggregate_associations(cooccurrences: Iterator[CoOccurence]) -> EvidenceAggregator:
-    aggregator = EvidenceAggregator()
+def _aggregate_associations(cooccurrences: Iterator[CoOccurence], type_to_ontology, propagate: bool = True) -> EvidenceAggregator:
+    aggregator = EvidenceAggregator(type_to_ontology, propagate=propagate)
     for cooc in cooccurrences:
         aggregator.record_coccurrence(cooc)
     return aggregator
 
 
-def run_from_normalized_output(norm_hits_pattern: str, output_name: str, output_dir: str | Path, duck=True, debug=logging.INFO) -> EvidenceAggregator:
+def run_from_normalized_output(entity_configs: list[EntityConfig], norm_hits_pattern: str, output_name: str, output_dir: str | Path,
+                               propagate: bool = True, duck=True, debug=logging.INFO) -> EvidenceAggregator:
     '''Run aggregation + scoring from existing hits files, duck=True uses duckDB to merge/sort over multiple files.
-    If duck=False, norm_hits_pattern needs to point to a single file.'''
+    If duck=False, norm_hits_pattern needs to point to a single file.
+    propagate=False builds direct-only associations (the ablation); no ontology graph is loaded then.
+    Use a different output_name than the extraction run: the .cooc file is re-derived and written.'''
     output_dir = Path(output_dir)
     
     log_path = setup_logging(output_dir = output_dir,
@@ -125,14 +128,19 @@ def run_from_normalized_output(norm_hits_pattern: str, output_name: str, output_
     logger.info('  source: %s (reader=%s)', norm_hits_pattern, 'duckdb' if duck else 'csv')
     logger.info('  output: %s', assoc_path)
     logger.info('  log:    %s', log_path)
+    logger.info('  propagate: %s', propagate)
+
+    # Only association target types need a graph (not MIR, not TAXON), and only when propagating.
+    target_configs = [c for c in entity_configs if Grouper.valid_types(HitType.MIR, c.entity_type)] if propagate else []
+    type_to_ontology = {c.entity_type: c.get_graph() for c in target_configs}
+    logger.info('  graphs loaded: %s', [t.name for t in type_to_ontology] or 'none')
 
     hit_stream = read_normalized_hits(norm_hits_pattern) if duck else read_normalized_hits_tsv(Path(norm_hits_pattern))
     successfully_normed_hits = _successfully_normalized(hit_stream)
 
     coocs = write_cooccurrences_tsv(Grouper.extract_cooccurrences(successfully_normed_hits), output_path=output_dir / f'{output_name}.cooc')
-    aggregator = _aggregate_associations(coocs)
+    aggregator = _aggregate_associations(coocs, type_to_ontology, propagate=propagate)
 
-    
     write_associations_tsv(aggregator.associations.values(), assoc_path)
     if not aggregator.associations:
         logger.warning('No associations produced - check that the run covers at least two entity types')
