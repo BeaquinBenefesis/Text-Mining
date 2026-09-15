@@ -45,13 +45,7 @@ class EntityConfig():
         source = res.ONTOLOGY_SOURCES.get(self.entity_type)
         if not source:
             raise ValueError(f'No ontology source stored for entity type: {self.entity_type}')
-        if source.cache_path and source.cache_path.exists():
-            return OntologyGraph.load(source.cache_path)
-        else:
-            return OntologyGraph.from_obo(
-                obo_path=source.local_path,
-                **source.obo_kwargs
-            )
+        return OntologyGraph.from_source(source)
 
     def get_normalizer(self) -> DefaultNormalizer:
         return DefaultNormalizer()
@@ -179,6 +173,16 @@ class MirnaPipelineConfig(PipelineConfig):
 @dataclass(kw_only=True)
 class DiseasePipelineConfig(PipelineConfig):
     entity_configs: list[EntityConfig] = field(default_factory=lambda:[DiseaseConfig()])
+
+@dataclass(kw_only=True)
+class CompletePipelineConfig(PipelineConfig):
+    entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), 
+                                                                      TaxonConfig(), 
+                                                                      DiseaseConfig(), 
+                                                                      TissueConfig(),
+                                                                      CellConfig(),
+                                                                      PathwayConfig(),
+                                                                      BpConfig()])
 
 @dataclass(kw_only=True)
 class MirnaDiseasePipelineConfig(PipelineConfig):

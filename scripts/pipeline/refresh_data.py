@@ -31,10 +31,16 @@ def refresh_ontology(source: "res.OntologySource", offline: bool = False) -> Ont
     offline with an existing cache, or rebuild declined)."""
     cached = OntologyGraph.load(source.cache_path) if source.cache_path.exists() else None
 
+    roots_changed = cached is not None and not cached.built_with_roots(source.roots)
+    if roots_changed:
+        logger.info("%s: cache built with roots %s, configured roots are %s",
+                    source.hit_type.name, cached.root_ids, source.roots)
+
     if offline or source.url is None:
-        if cached is None:
-            logger.info("%s: no cache and no network access, building from local .obo", source.hit_type.name)
-            graph = OntologyGraph.from_obo(source.local_path, **source.obo_kwargs)
+        if cached is None or roots_changed:
+            logger.info("%s: %s, building from local .obo", source.hit_type.name,
+                        "roots changed" if roots_changed else "no cache and no network access")
+            graph = OntologyGraph.from_obo(source.local_path, root_ids=source.roots, **source.obo_kwargs)
             graph.save(source.cache_path)
             return graph
         logger.info("%s: offline, keeping existing cache", source.hit_type.name)
@@ -44,16 +50,16 @@ def refresh_ontology(source: "res.OntologySource", offline: bool = False) -> Ont
     new_hash = hashlib.sha256(new_bytes).hexdigest()
     old_hash = cached.source_hash if cached else None
 
-    if cached is not None and old_hash == new_hash:
+    if cached is not None and old_hash == new_hash and not roots_changed:
         logger.info("%s: up to date", source.hit_type.name)
         return None
 
-    if cached is not None and not _prompt_rebuild(source, old_hash, new_hash):
+    if cached is not None and old_hash != new_hash and not _prompt_rebuild(source, old_hash, new_hash):
         logger.info("%s: rebuild declined, keeping existing cache", source.hit_type.name)
         return None
 
     source.local_path.write_bytes(new_bytes)
-    graph = OntologyGraph.from_obo(source.local_path, **source.obo_kwargs)  # sets graph.source_hash itself
+    graph = OntologyGraph.from_obo(source.local_path, root_ids=source.roots, **source.obo_kwargs)  # sets graph.source_hash itself
     graph.save(source.cache_path)
     logger.info("%s: rebuilt (%s)", source.hit_type.name, graph.source_hash[:8])
     return graph

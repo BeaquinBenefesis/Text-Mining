@@ -71,7 +71,7 @@ if __name__ == '__main__':
                                        ignore_obsolete=ignore_obsolete)
     else:
         graph = OntologyGraph.from_obo(obo_path=obo,
-                            relatioship=rel,
+                            relationship=rel,
                             exclude_gci=exclude_gci,
                             ignore_obsolete=ignore_obsolete)
     write_syn_file(

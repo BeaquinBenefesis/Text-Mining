@@ -20,6 +20,13 @@ def to_external_id(term_id: str) -> str:
     prefix, local_id = term_id.split(":", 1)
     return f"{prefix}_{local_id}"
 
+def normalize_root_ids(root_ids: Iterable[str] | None) -> tuple[str, ...] | None:
+    """Canonical form for a root set: internal ids, deduplicated, sorted. None and
+    empty both mean 'unrestricted', so they compare equal."""
+    if not root_ids:
+        return None
+    return tuple(sorted({to_internal_id(r) for r in root_ids}))
+
 def to_internal_id(term_id: str) -> str:
     if ":" in term_id:
         return term_id
@@ -78,17 +85,29 @@ def read_obo(
 class OntologyGraph:
 
     source_hash: str | None = None
+    # Class-level default so pickles built before root restriction existed load
+    # with root_ids = None, which is exactly what they are: unrestricted.
+    root_ids: tuple[str, ...] | None = None
 
     def __init__(self,
                  graph: rx.PyDiGraph,
-                 relationship: str):
-        self.graph = graph
-        self.relationship = relationship
+                 relationship: str,
+                 root_ids: Iterable[str] | None = None):
         graph_name = graph.attrs.get('name', '')
-        
         t0 = time.monotonic()
         logger.info("Parsed ontology graph: %s", graph_name)
-        
+
+        # Restrict first: everything below (_id_to_idx from self.graph, ancestors/IC
+        # from _rel_subgraph) assumes both share one contiguous index space.
+        self.root_ids = normalize_root_ids(root_ids)
+        if self.root_ids:
+            n_before = graph.num_nodes()
+            graph = OntologyGraph.restrict_to_roots(graph, relationship, self.root_ids)
+            logger.info("Restricted %s to %d root(s): %d -> %d nodes",
+                        graph_name, len(self.root_ids), n_before, graph.num_nodes())
+        self.graph = graph
+        self.relationship = relationship
+
         self._rel_subgraph = OntologyGraph.build_relationship_subgraph(self.graph, self.relationship)
         if not rx.is_directed_acyclic_graph(self._rel_subgraph):
             logger.critical("Relationship subgraph for %s is not a DAG", graph_name)
@@ -101,6 +120,12 @@ class OntologyGraph:
         logger.debug("Found %d root(s) for %s", len(self.roots), graph_name)
         
         self._id_to_idx = {data["id"]: idx for idx, data in zip(self.graph.node_indices(), self.graph.nodes())}
+        if self.root_ids:
+            found = {self._rel_subgraph[idx]["id"] for idx in self.roots}
+            if found != set(self.root_ids):
+                logger.critical("Roots of restricted %s are %s, expected %s",
+                                graph_name, sorted(found), list(self.root_ids))
+                raise RuntimeError(f"Root restriction produced unexpected roots for {graph_name}")
         self._alt_id_to_idx = OntologyGraph._build_alt_id_map(self._rel_subgraph)
         logger.debug("Built alt-id map for %s (%d entries)", graph_name, len(self._alt_id_to_idx))
                 
@@ -133,18 +158,38 @@ class OntologyGraph:
     @classmethod
     def from_obo(cls,
                  obo_path: str | Path,
-                 relatioship: str = 'is_a',
+                 relationship: str = 'is_a',
                  exclude_gci: bool = False,
-                 ignore_obsolete: bool = True):
+                 ignore_obsolete: bool = True,
+                 root_ids: Iterable[str] | None = None):
         nx_graph = read_obo(source=obo_path,
                             ignore_obsolete=ignore_obsolete,
                             exclude_gci=exclude_gci,)
         graph = cls.from_nx_graph(nx_graph=nx_graph,
-                                 relationship=relatioship,
-                                 name=obo_path)
+                                 relationship=relationship,
+                                 name=obo_path,
+                                 root_ids=root_ids)
         graph.source_hash = hashlib.sha256(Path(obo_path).read_bytes()).hexdigest()
 
         return graph
+
+    @classmethod
+    def from_source(cls, source) -> 'OntologyGraph':
+        """Load an OntologySource (resources.py): the pickle cache if it was built
+        with the same roots, otherwise parse the .obo in memory. The cache is not
+        rewritten here -- refresh_data.py owns it."""
+        if source.cache_path and source.cache_path.exists():
+            cached = cls.load(source.cache_path)
+            if cached.built_with_roots(source.roots):
+                return cached
+            logger.warning("%s: cache %s was built with roots %s, expected %s; parsing %s "
+                           "instead (run scripts/pipeline/refresh_data.py to update the cache)",
+                           source.hit_type.name, source.cache_path, cached.root_ids,
+                           normalize_root_ids(source.roots), source.local_path)
+        return cls.from_obo(obo_path=source.local_path, root_ids=source.roots, **source.obo_kwargs)
+
+    def built_with_roots(self, root_ids: Iterable[str] | None) -> bool:
+        return self.root_ids == normalize_root_ids(root_ids)
         
     @classmethod
     def from_merge(cls, obo_paths, equivalence_fn, relationship='is_a'):
@@ -206,7 +251,8 @@ class OntologyGraph:
     def from_nx_graph(cls, 
                       nx_graph: nx.MultiDiGraph,
                       relationship: str = 'is_a',
-                      name: str = 'unknown'):
+                      name: str = 'unknown',
+                      root_ids: Iterable[str] | None = None):
         for node_id, data in nx_graph.nodes(data=True):
             data['id'] = node_id
         for _, _, key, data in nx_graph.edges(keys=True, data=True):
@@ -216,8 +262,31 @@ class OntologyGraph:
             'name':
                 getattr(nx_graph, 'name', name)
         }
-        return cls(rx_graph, relationship)
-        
+        return cls(rx_graph, relationship, root_ids=root_ids)
+
+    @staticmethod
+    def restrict_to_roots(graph: rx.PyDiGraph,
+                          relationship: str,
+                          root_ids: Iterable[str]) -> rx.PyDiGraph:
+        """Induced subgraph over the roots and their descendants along `relationship`.
+        Other edge types among kept nodes survive; edges to dropped nodes do not.
+
+        Uses subgraph(), which renumbers indices contiguously. remove_nodes_from()
+        would leave gaps, and build_relationship_subgraph re-adds nodes from 0, so the
+        edges would silently attach to the wrong nodes."""
+        rel_subgraph = OntologyGraph.build_relationship_subgraph(graph, relationship)
+        id_to_idx = {data["id"]: idx for idx, data in zip(graph.node_indices(), graph.nodes())}
+        missing = [r for r in root_ids if r not in id_to_idx]
+        if missing:
+            logger.error("Root id(s) not in graph %s: %s", graph.attrs.get('name', ''), missing)
+            raise ValueError(f"Root id(s) not in graph: {missing}")
+        keep = set()
+        for root_id in root_ids:
+            root_idx = id_to_idx[root_id]
+            keep.add(root_idx)
+            keep.update(rx.descendants(rel_subgraph, root_idx))
+        return graph.subgraph(sorted(keep), preserve_attrs=True)
+
     @staticmethod
     def _build_alt_id_map(graph: rx.PyDiGraph):        
         alt_id_to_idx = {}
@@ -293,14 +362,14 @@ class OntologyGraph:
         if len(lca_indices) == 1:
             return self.map_idx_to_external_id(lca_indices[0]) 
         
-        max_lca_idx = max(lca_indices, key=lambda idx: (self._compute_ic_from_index(idx), idx))
+        max_lca_idx = max(lca_indices, key=lambda idx: (self.compute_ic_from_index(idx), idx))
         return self.map_idx_to_external_id(max_lca_idx)
         
         
     def compute_ic(self, term_id):
-        return self._compute_ic_from_index(self.map_to_index(term_id))
+        return self.compute_ic_from_index(self.map_to_index(term_id))
     
-    def _compute_ic_from_index(self, idx):
+    def compute_ic_from_index(self, idx):
         if idx not in self._descendant_count_cache:
             if not self._rel_subgraph.has_node(idx):
                 logger.error('Unknown index for IC computation: %d', idx)
@@ -344,8 +413,9 @@ class OntologyGraph:
             external_id = to_external_id(data['id'])
         return external_id
     
-    def iter_nodes(self) -> Iterator:
-        return (self._rel_subgraph[idx] for idx in self._rel_subgraph.node_indices())
+    def iter_nodes(self, root_ids: Iterator[str] | None = None) -> Iterator:
+        indices = self.calculate_descendant_closure(root_ids) if root_ids else self._rel_subgraph.node_indices()
+        return (self._rel_subgraph[idx] for idx in indices)
     
     # Root ids in internal format
     def extract_synonyms(self,
@@ -355,10 +425,7 @@ class OntologyGraph:
         with none."""
         indices = self._rel_subgraph.node_indices()
         if root_ids:
-            indices = set()
-            for root_id in root_ids:
-                root_idx = self._id_to_idx[root_id]
-                indices.update(rx.descendants(self._rel_subgraph, root_idx) | {root_idx})
+            indices = self.calculate_descendant_closure(root_ids)
 
         results = []
         for idx in indices:
@@ -375,5 +442,13 @@ class OntologyGraph:
 
         results.sort(key=lambda triple: triple[0])
         yield from results
-            
+    
+    def calculate_descendant_closure(self, root_ids: Iterator[str]):
+        indices = set()
+        if root_ids:
+            for root_id in root_ids:
+                root_idx = self._id_to_idx[root_id]
+                indices.update(rx.descendants(self._rel_subgraph, root_idx) | {root_idx})
+        return indices
+
     

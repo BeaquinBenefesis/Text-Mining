@@ -27,7 +27,16 @@ class OntologySource:
     cache_path: Path
     obo_kwargs: dict = field(default_factory=dict)
     source: str = ""   # short canonical label for entity.source, e.g. 'mondo', 'go'
+    roots: tuple[str, ...] | None = None   # graph is restricted to these + descendants. None = whole file
 
+ONTOLOGY_ROOTS: dict[HitType, tuple[str, ...]] = {
+    HitType.DISEASE: ('MONDO:0000001',),
+    HitType.TAXON: ('NCBITaxon:131567', 'NCBITaxon:10239'),
+    HitType.CELL: ('CL:0000000',),
+    HitType.TISSUE: ('BTO:0000042', 'BTO:0001494', 'BTO:0001490', 'BTO:0001481'),
+    HitType.PATHWAY: ('PW:0000001',),
+    HitType.BIOLOGICAL_PROCESS: ('GO:0008150',),
+}
 
 ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
     HitType.DISEASE: OntologySource(HitType.DISEASE,
@@ -35,16 +44,19 @@ ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
                                     url=external.MONDO_OBO_URL,
                                     cache_path=MONDO_OBO.with_suffix('.pkl'),
                                     obo_kwargs={'exclude_gci': True},
-                                    source='mondo'),
+                                    source='mondo',
+                                    roots=ONTOLOGY_ROOTS[HitType.DISEASE]),
     HitType.TAXON:   OntologySource(HitType.TAXON,
                                     TAXON_OBO,
                                     url=external.TAXON_OBO_URL,
                                     cache_path=TAXON_OBO.with_suffix('.pkl'),
                                     source='ncbi_taxonomy'),
-    HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl'), source='cl'),
-    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl'), source='bto'),
-    HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl'), source='pw'),
-    HitType.BIOLOGICAL_PROCESS: OntologySource(HitType.BIOLOGICAL_PROCESS, GO_OBO, url=external.GO_OBO_URL, cache_path=GO_OBO.with_suffix('.pkl'), source='go'),
+                                    # NOT restricted: 20,598 ids in the LINNAEUS .syn files lie
+                                    # outside ONTOLOGY_ROOTS[TAXON] and would stop resolving.
+    HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl'), source='cl', roots=ONTOLOGY_ROOTS[HitType.CELL]),
+    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl'), source='bto', roots=ONTOLOGY_ROOTS[HitType.TISSUE]),
+    HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl'), source='pw', roots=ONTOLOGY_ROOTS[HitType.PATHWAY]),
+    HitType.BIOLOGICAL_PROCESS: OntologySource(HitType.BIOLOGICAL_PROCESS, GO_OBO, url=external.GO_OBO_URL, cache_path=GO_OBO.with_suffix('.pkl'), source='go', roots=ONTOLOGY_ROOTS[HitType.BIOLOGICAL_PROCESS]),
 }
 
 
@@ -66,11 +78,11 @@ BIOLOGICAL_PROCESS_ABBREV = SYNONYM_DIR / "biological_process_abbreviations.syn"
 
 
 EXTRACTABLE_SYNONYMS: dict[HitType, list[ExtractedSynonymSpec]] = {
-    HitType.DISEASE:  [ExtractedSynonymSpec(output_path=DISEASE_SYNS, abbreviation_output_path=DISEASE_ABBREV, roots=['MONDO:0000001'])],
-    HitType.CELL:     [ExtractedSynonymSpec(output_path=CELL_SYNS, abbreviation_output_path=CELL_ABBREV, roots=['CL:0000000'])],
-    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, abbreviation_output_path=TISSUE_ABBREV, roots=['BTO:0000042', 'BTO:0001494', 'BTO:0001490', 'BTO:0001481'])],
-    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, abbreviation_output_path=PATHWAY_ABBREV, roots=['PW:0000001'])],
-    HitType.BIOLOGICAL_PROCESS: [ExtractedSynonymSpec(BIOLOGICAL_PROCESS_SYNS, abbreviation_output_path=BIOLOGICAL_PROCESS_ABBREV, roots=['GO:0008150'])],
+    HitType.DISEASE:  [ExtractedSynonymSpec(output_path=DISEASE_SYNS, abbreviation_output_path=DISEASE_ABBREV, roots=ONTOLOGY_ROOTS[HitType.DISEASE])],
+    HitType.CELL:     [ExtractedSynonymSpec(output_path=CELL_SYNS, abbreviation_output_path=CELL_ABBREV, roots=ONTOLOGY_ROOTS[HitType.CELL])],
+    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, abbreviation_output_path=TISSUE_ABBREV, roots=ONTOLOGY_ROOTS[HitType.TISSUE])],
+    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, abbreviation_output_path=PATHWAY_ABBREV, roots=ONTOLOGY_ROOTS[HitType.PATHWAY])],
+    HitType.BIOLOGICAL_PROCESS: [ExtractedSynonymSpec(BIOLOGICAL_PROCESS_SYNS, abbreviation_output_path=BIOLOGICAL_PROCESS_ABBREV, roots=ONTOLOGY_ROOTS[HitType.BIOLOGICAL_PROCESS])],
 }
 
 
@@ -86,6 +98,11 @@ MIR_PRECURSOR_NORM_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaT
 MIR_MATURE_NORM_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/mature_normalization_dict.json")
 MIR_PRECURSOR_AMBI_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/precursor_id_conflicts.tsv")
 MIR_MATURE_AMBI_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/mature_id_conflicts.tsv")
+# Full per-release name<->accession record. Superset of the *_id_conflicts files:
+# the conflicted names are exactly `GROUP BY mirna_name HAVING COUNT(DISTINCT
+# accession) > 1` over these (verified set-identical after casefolding).
+MIR_MATURE_HISTORY_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/mirna_mature_history.tsv")
+MIR_PRECURSOR_HISTORY_PATH = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/normalization/mirna_precursor_history.tsv")
 MIR_TEST_SENTS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mirbase/testing/mirbase.sent")
 
 ## VALIDATION
@@ -118,5 +135,5 @@ def validate_paths(value):
 
 
 ## METADATA
-PUBMED_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pmc_metadata.csv")
-PMC_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pubmed_metadata.csv")
+PUBMED_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pubmed_metadata.csv")
+PMC_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pmc_metadata.csv")
