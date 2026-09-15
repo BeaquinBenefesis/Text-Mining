@@ -28,12 +28,15 @@ class OntologySource:
     obo_kwargs: dict = field(default_factory=dict)
     source: str = ""   # short canonical label for entity.source, e.g. 'mondo', 'go'
     roots: tuple[str, ...] | None = None   # graph is restricted to these + descendants. None = whole file
+    # edge types followed for restriction, ancestors, IC and closure
+    relationships: tuple[str, ...] = ('is_a',)
 
 ONTOLOGY_ROOTS: dict[HitType, tuple[str, ...]] = {
     HitType.DISEASE: ('MONDO:0000001',),
     HitType.TAXON: ('NCBITaxon:131567', 'NCBITaxon:10239'),
     HitType.CELL: ('CL:0000000',),
-    HitType.TISSUE: ('BTO:0000042', 'BTO:0001494', 'BTO:0001490', 'BTO:0001481'),
+    # whole body, whole plant. BTO organises anatomy mainly by part_of (design notes 13.2).
+    HitType.TISSUE: ('BTO:0001489', 'BTO:0001461'),
     HitType.PATHWAY: ('PW:0000001',),
     HitType.BIOLOGICAL_PROCESS: ('GO:0008150',),
 }
@@ -54,7 +57,8 @@ ONTOLOGY_SOURCES: dict[HitType, OntologySource] = {
                                     # NOT restricted: 20,598 ids in the LINNAEUS .syn files lie
                                     # outside ONTOLOGY_ROOTS[TAXON] and would stop resolving.
     HitType.CELL:    OntologySource(HitType.CELL, CELL_OBO, url=external.CL_OBO_URL, cache_path=CELL_OBO.with_suffix('.pkl'), source='cl', roots=ONTOLOGY_ROOTS[HitType.CELL]),
-    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl'), source='bto', roots=ONTOLOGY_ROOTS[HitType.TISSUE]),
+    HitType.TISSUE:  OntologySource(HitType.TISSUE, TISSUE_OBO, url=external.BTO_OBO_URL, cache_path=TISSUE_OBO.with_suffix('.pkl'), source='bto', roots=ONTOLOGY_ROOTS[HitType.TISSUE],
+                                    relationships=('is_a', 'part_of')),
     HitType.PATHWAY: OntologySource(HitType.PATHWAY, PATHWAY_OBO, url=external.PW_OBO_URL, cache_path=PATHWAY_OBO.with_suffix('.pkl'), source='pw', roots=ONTOLOGY_ROOTS[HitType.PATHWAY]),
     HitType.BIOLOGICAL_PROCESS: OntologySource(HitType.BIOLOGICAL_PROCESS, GO_OBO, url=external.GO_OBO_URL, cache_path=GO_OBO.with_suffix('.pkl'), source='go', roots=ONTOLOGY_ROOTS[HitType.BIOLOGICAL_PROCESS]),
 }

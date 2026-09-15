@@ -27,6 +27,16 @@ def normalize_root_ids(root_ids: Iterable[str] | None) -> tuple[str, ...] | None
         return None
     return tuple(sorted({to_internal_id(r) for r in root_ids}))
 
+def normalize_relationships(relationships: str | Iterable[str]) -> tuple[str, ...]:
+    """Canonical form for a relationship set: a plain string is one relationship;
+    otherwise deduplicated and sorted, so ('part_of', 'is_a') == ('is_a', 'part_of')."""
+    if isinstance(relationships, str):
+        return (relationships,)
+    normalized = tuple(sorted(set(relationships)))
+    if not normalized:
+        raise ValueError("At least one relationship type is required")
+    return normalized
+
 def to_internal_id(term_id: str) -> str:
     if ":" in term_id:
         return term_id
@@ -43,7 +53,7 @@ OBO_SYNONYM_RE = re.compile(
 
 def get_exact_synonyms(node_data: dict) -> tuple[list[str], list[str]]:
     """EXACT-scope synonyms for a node, split into (synonyms, abbreviations)
-    by the OBO synonym TYPE field (e.g. "ABBREVIATION")."""
+    by the OBO synonym TYPE field (e.g. "ABBREVIATION") or abbreviation detection criteria."""
     syns, abbrevs = [], []
     for s in node_data.get("synonym", []):
         match = OBO_SYNONYM_RE.match(s)
@@ -53,8 +63,13 @@ def get_exact_synonyms(node_data: dict) -> tuple[list[str], list[str]]:
         if scope != "EXACT":
             continue
         text = text.replace(r'\"', '"')
-        (abbrevs if syn_type in ABBREVIATION_TAGS else syns).append(text)
+        (abbrevs if syn_type in ABBREVIATION_TAGS or (text != node_data.get("name") and probable_abbreviation(text)) else syns).append(text)
     return syns, abbrevs
+
+def probable_abbreviation(term: str) -> bool:
+    upper_count = sum(1 for char in term if char.isupper())
+    alpha_count = len([c for c in term if c.isalpha()])
+    return len(term) <= 8 and " " not in term and upper_count >= 2 and (upper_count / alpha_count) >= 0.5
 
 def _process_obo_lines(lines: Iterable[str], ignore_obsolete: bool, exclude_gci: bool):
     cleaned_lines = []
@@ -88,10 +103,12 @@ class OntologyGraph:
     # Class-level default so pickles built before root restriction existed load
     # with root_ids = None, which is exactly what they are: unrestricted.
     root_ids: tuple[str, ...] | None = None
+    # Same idea: pickles from before multi-relationship support were all is_a-only.
+    relationships: tuple[str, ...] = ('is_a',)
 
     def __init__(self,
                  graph: rx.PyDiGraph,
-                 relationship: str,
+                 relationships: str | Iterable[str] = 'is_a',
                  root_ids: Iterable[str] | None = None):
         graph_name = graph.attrs.get('name', '')
         t0 = time.monotonic()
@@ -100,15 +117,16 @@ class OntologyGraph:
         # Restrict first: everything below (_id_to_idx from self.graph, ancestors/IC
         # from _rel_subgraph) assumes both share one contiguous index space.
         self.root_ids = normalize_root_ids(root_ids)
+        self.relationships = normalize_relationships(relationships)
         if self.root_ids:
             n_before = graph.num_nodes()
-            graph = OntologyGraph.restrict_to_roots(graph, relationship, self.root_ids)
-            logger.info("Restricted %s to %d root(s): %d -> %d nodes",
-                        graph_name, len(self.root_ids), n_before, graph.num_nodes())
+            graph = OntologyGraph.restrict_to_roots(graph, self.relationships, self.root_ids)
+            logger.info("Restricted %s to %d root(s) over %s: %d -> %d nodes",
+                        graph_name, len(self.root_ids), '+'.join(self.relationships),
+                        n_before, graph.num_nodes())
         self.graph = graph
-        self.relationship = relationship
 
-        self._rel_subgraph = OntologyGraph.build_relationship_subgraph(self.graph, self.relationship)
+        self._rel_subgraph = OntologyGraph.build_relationship_subgraph(self.graph, self.relationships)
         if not rx.is_directed_acyclic_graph(self._rel_subgraph):
             logger.critical("Relationship subgraph for %s is not a DAG", graph_name)
             raise RuntimeError("LCA only defined on directed acyclic graphs.")
@@ -158,7 +176,7 @@ class OntologyGraph:
     @classmethod
     def from_obo(cls,
                  obo_path: str | Path,
-                 relationship: str = 'is_a',
+                 relationships: str | Iterable[str] = 'is_a',
                  exclude_gci: bool = False,
                  ignore_obsolete: bool = True,
                  root_ids: Iterable[str] | None = None):
@@ -166,7 +184,7 @@ class OntologyGraph:
                             ignore_obsolete=ignore_obsolete,
                             exclude_gci=exclude_gci,)
         graph = cls.from_nx_graph(nx_graph=nx_graph,
-                                 relationship=relationship,
+                                 relationships=relationships,
                                  name=obo_path,
                                  root_ids=root_ids)
         graph.source_hash = hashlib.sha256(Path(obo_path).read_bytes()).hexdigest()
@@ -176,30 +194,33 @@ class OntologyGraph:
     @classmethod
     def from_source(cls, source) -> 'OntologyGraph':
         """Load an OntologySource (resources.py): the pickle cache if it was built
-        with the same roots, otherwise parse the .obo in memory. The cache is not
-        rewritten here -- refresh_data.py owns it."""
+        with the same roots and relationships, otherwise parse the .obo in memory.
+        The cache is not rewritten here -- refresh_data.py owns it."""
         if source.cache_path and source.cache_path.exists():
             cached = cls.load(source.cache_path)
-            if cached.built_with_roots(source.roots):
+            if cached.built_with(source.roots, source.relationships):
                 return cached
-            logger.warning("%s: cache %s was built with roots %s, expected %s; parsing %s "
-                           "instead (run scripts/pipeline/refresh_data.py to update the cache)",
-                           source.hit_type.name, source.cache_path, cached.root_ids,
-                           normalize_root_ids(source.roots), source.local_path)
-        return cls.from_obo(obo_path=source.local_path, root_ids=source.roots, **source.obo_kwargs)
+            logger.warning("%s: cache %s was built with roots %s over %s, expected roots %s over %s; "
+                           "parsing %s instead (run scripts/pipeline/refresh_data.py to update the cache)",
+                           source.hit_type.name, source.cache_path, cached.root_ids, cached.relationships,
+                           normalize_root_ids(source.roots), normalize_relationships(source.relationships),
+                           source.local_path)
+        return cls.from_obo(obo_path=source.local_path, relationships=source.relationships,
+                            root_ids=source.roots, **source.obo_kwargs)
 
-    def built_with_roots(self, root_ids: Iterable[str] | None) -> bool:
-        return self.root_ids == normalize_root_ids(root_ids)
+    def built_with(self, root_ids: Iterable[str] | None, relationships: str | Iterable[str]) -> bool:
+        return (self.root_ids == normalize_root_ids(root_ids)
+                and self.relationships == normalize_relationships(relationships))
         
     @classmethod
-    def from_merge(cls, obo_paths, equivalence_fn, relationship='is_a'):
+    def from_merge(cls, obo_paths, equivalence_fn, relationships='is_a'):
         raise NotImplementedError('Merging not implemented yet.')
 
     @classmethod
     def from_dict(cls, 
                   edges: tuple | list,
                   nodes: dict, 
-                  relationship: str = 'is_a', 
+                  relationships: str | Iterable[str] = 'is_a', 
                   name: str = ''):
         g = rx.PyDiGraph(attrs={'name': name})
         
@@ -245,12 +266,12 @@ class OntologyGraph:
             
             edge_payload = {"key": k, **data}
             g.add_edge(term_id_to_idx[u], term_id_to_idx[v], edge_payload)
-        return cls(g, relationship)
+        return cls(g, relationships)
     
     @classmethod
     def from_nx_graph(cls, 
                       nx_graph: nx.MultiDiGraph,
-                      relationship: str = 'is_a',
+                      relationships: str | Iterable[str] = 'is_a',
                       name: str = 'unknown',
                       root_ids: Iterable[str] | None = None):
         for node_id, data in nx_graph.nodes(data=True):
@@ -262,19 +283,19 @@ class OntologyGraph:
             'name':
                 getattr(nx_graph, 'name', name)
         }
-        return cls(rx_graph, relationship, root_ids=root_ids)
+        return cls(rx_graph, relationships, root_ids=root_ids)
 
     @staticmethod
     def restrict_to_roots(graph: rx.PyDiGraph,
-                          relationship: str,
+                          relationships: str | Iterable[str],
                           root_ids: Iterable[str]) -> rx.PyDiGraph:
-        """Induced subgraph over the roots and their descendants along `relationship`.
+        """Induced subgraph over the roots and their descendants along any of `relationships`.
         Other edge types among kept nodes survive; edges to dropped nodes do not.
 
         Uses subgraph(), which renumbers indices contiguously. remove_nodes_from()
         would leave gaps, and build_relationship_subgraph re-adds nodes from 0, so the
         edges would silently attach to the wrong nodes."""
-        rel_subgraph = OntologyGraph.build_relationship_subgraph(graph, relationship)
+        rel_subgraph = OntologyGraph.build_relationship_subgraph(graph, relationships)
         id_to_idx = {data["id"]: idx for idx, data in zip(graph.node_indices(), graph.nodes())}
         missing = [r for r in root_ids if r not in id_to_idx]
         if missing:
@@ -298,14 +319,18 @@ class OntologyGraph:
     
     @staticmethod
     def build_relationship_subgraph(graph: rx.PyDiGraph, 
-                                    relationship: str):
+                                    relationships: str | Iterable[str]):
+        """Parent -> child graph over the edges whose key is one of `relationships`.
+        A pair linked by several kept relationships gets parallel edges; ancestors,
+        descendants, depths and the in-degree root test are unaffected by that."""
+        keys = set(normalize_relationships(relationships))
         rel_subgraph = rx.PyDiGraph(multigraph=True)
         
         rel_subgraph.add_nodes_from(graph.nodes())
 
         kept_edges = [
             (u, v, data) for u, v, data in graph.weighted_edge_list() 
-            if data['key'] == relationship
+            if data['key'] in keys
         ]
         rel_subgraph.add_edges_from([(v, u, data) for u, v, data in kept_edges])
 
@@ -346,7 +371,7 @@ class OntologyGraph:
         keep = self.ancestor_closure(indices)
         sub = self.graph.subgraph(keep, preserve_attrs=True).copy()
         if as_ontology_graph:
-            return OntologyGraph(sub, self.relationship)
+            return OntologyGraph(sub, self.relationships)
         return sub
     
     def find_lca(self, *term_ids):

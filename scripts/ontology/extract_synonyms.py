@@ -66,12 +66,12 @@ if __name__ == '__main__':
     graph = None
     if obo.startswith(("http://", "https://", "ftp://")): 
         graph = OntologyGraph.from_url(url=obo,
-                                       relationship=rel,
+                                       relationships=rel,
                                        exclude_gci=exclude_gci,
                                        ignore_obsolete=ignore_obsolete)
     else:
         graph = OntologyGraph.from_obo(obo_path=obo,
-                            relationship=rel,
+                            relationships=rel,
                             exclude_gci=exclude_gci,
                             ignore_obsolete=ignore_obsolete)
     write_syn_file(

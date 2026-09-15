@@ -31,16 +31,18 @@ def refresh_ontology(source: "res.OntologySource", offline: bool = False) -> Ont
     offline with an existing cache, or rebuild declined)."""
     cached = OntologyGraph.load(source.cache_path) if source.cache_path.exists() else None
 
-    roots_changed = cached is not None and not cached.built_with_roots(source.roots)
+    roots_changed = cached is not None and not cached.built_with(source.roots, source.relationships)
     if roots_changed:
-        logger.info("%s: cache built with roots %s, configured roots are %s",
-                    source.hit_type.name, cached.root_ids, source.roots)
+        logger.info("%s: cache built with roots %s over %s, configured roots %s over %s",
+                    source.hit_type.name, cached.root_ids, cached.relationships,
+                    source.roots, source.relationships)
 
     if offline or source.url is None:
         if cached is None or roots_changed:
             logger.info("%s: %s, building from local .obo", source.hit_type.name,
-                        "roots changed" if roots_changed else "no cache and no network access")
-            graph = OntologyGraph.from_obo(source.local_path, root_ids=source.roots, **source.obo_kwargs)
+                        "roots or relationships changed" if roots_changed else "no cache and no network access")
+            graph = OntologyGraph.from_obo(source.local_path, relationships=source.relationships,
+                                           root_ids=source.roots, **source.obo_kwargs)
             graph.save(source.cache_path)
             return graph
         logger.info("%s: offline, keeping existing cache", source.hit_type.name)
@@ -59,7 +61,8 @@ def refresh_ontology(source: "res.OntologySource", offline: bool = False) -> Ont
         return None
 
     source.local_path.write_bytes(new_bytes)
-    graph = OntologyGraph.from_obo(source.local_path, root_ids=source.roots, **source.obo_kwargs)  # sets graph.source_hash itself
+    graph = OntologyGraph.from_obo(source.local_path, relationships=source.relationships,
+                                   root_ids=source.roots, **source.obo_kwargs)  # sets graph.source_hash itself
     graph.save(source.cache_path)
     logger.info("%s: rebuilt (%s)", source.hit_type.name, graph.source_hash[:8])
     return graph

@@ -64,7 +64,7 @@ if __name__ == '__main__':
     ignore_obsolete = not args.no_ignore_obsolete
 
     graph = OntologyGraph.from_obo(obo_path=obo,
-                        relationship=rel,
+                        relationships=rel,
                         exclude_gci=exclude_gci,
                         ignore_obsolete=ignore_obsolete)
     
