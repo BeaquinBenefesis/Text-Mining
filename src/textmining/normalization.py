@@ -26,6 +26,7 @@ class DefaultNormalizer(EntityNormalizer):
 
 class MirNormalizer(EntityNormalizer):
     _SUFFIX_CLEANER = re.compile(r"[^a-zA-Z0-9*-]+")
+    DEFAULT_PREFIX = 'hsa'   # assumed when an article names no species that has miRNAs
     
     def __init__(self,
                  resources: MirNormalizationResources):
@@ -53,6 +54,9 @@ class MirNormalizer(EntityNormalizer):
             normalized_hit = NormalizedHit.from_candidate(hit,  NormalizationResult(NormalizationStatus.FILTERED))
             buffer_out.append(normalized_hit)
             return buffer_out
+
+        if combined_suffix:
+            combined_suffix = self._hyphenate(mirna_body, combined_suffix)
 
         norm_candidates: list[MirNormalizationCandidate] = []
         if not normalized_prefix:
@@ -84,7 +88,7 @@ class MirNormalizer(EntityNormalizer):
     # If prefix is missing, try to infer it, unless the hit is a family hit
     def _resolve_missing_prefix(self, sentence_id, mirna_body, mirna_suffix, normalization_context: NormalizationContext) -> Iterable[MirNormalizationCandidate]:
         mirna_with_suffix = mirna_body + (mirna_suffix or '')
-        implied_prefixes = self._get_implied_prefixes(normalization_context.get_taxon_relevance().keys())
+        implied_prefixes = self._get_implied_prefixes(normalization_context.taxon_ids)
         mirbase_prefixes = self.resources.mirna_2_prefix.get(mirna_with_suffix, None)
         family_accession = self.resources.family_normalizer.get(mirna_with_suffix, None)
 
@@ -115,7 +119,7 @@ class MirNormalizer(EntityNormalizer):
     # Try to infer the missing prefix by the intersection of implied prefixes and allowed prefixes
     def _resolve_by_prefix_intersection(self, mirna_body, suffix, implied_prefixes, mirbase_prefixes) -> Iterable[MirNormalizationCandidate]:
         matches = []
-        possible_prefixes = implied_prefixes & mirbase_prefixes
+        possible_prefixes = (implied_prefixes or {self.DEFAULT_PREFIX}) & mirbase_prefixes
         if not possible_prefixes:
             logger.debug(
                 "Prefix intersection empty for mirna_body=%s: implied=%s, mirbase=%s, UNKNOWN ENTITY",
@@ -126,6 +130,8 @@ class MirNormalizer(EntityNormalizer):
         else:
             for prefix in possible_prefixes:
                 normalization_result = self._map_to_accession(prefix=prefix, mirna_body=mirna_body, suffix=suffix)
+                if not implied_prefixes and normalization_result.status == NormalizationStatus.NORMALIZED:
+                    normalization_result.status = NormalizationStatus.FALLBACK
                 matches.append(MirNormalizationCandidate(normalization=normalization_result,prefix=prefix, suffix=suffix))
         return matches
     
@@ -136,7 +142,14 @@ class MirNormalizer(EntityNormalizer):
         target_type = None
         is_dead = False
         combined_mirna = MirNormalizer._join_parts(prefix, mirna_body + (suffix or ''))
-        if combined_mirna in self.resources.ambiguous_precursors or combined_mirna in self.resources.ambiguous_mature:
+        arm_precursor = self.resources.arm_switch_precursors.get(combined_mirna)
+        if arm_precursor:
+            # the name moved between the arms of one precursor across releases; the precursor is stable
+            status = NormalizationStatus.ARM_FALLBACK
+            accession = arm_precursor['accession']
+            target_type = NormalizationTargetType.MIR_PRECURSOR
+            is_dead = arm_precursor['dead']
+        elif combined_mirna in self.resources.ambiguous_precursors or combined_mirna in self.resources.ambiguous_mature:
             status = NormalizationStatus.IN_BLACKLIST
         else:
             precursor_data = self.resources.precursor_normalizer.get(combined_mirna, None)
@@ -157,6 +170,13 @@ class MirNormalizer(EntityNormalizer):
                 status = NormalizationStatus.NORMALIZED
         return NormalizationResult(status, accession, target_type, is_dead)
     
+    def _hyphenate(self, mirna_body, suffix) -> str:
+        """miR21 -> mir-21, unless the fused form is itself a miRBase name (zma-miR408a)."""
+        names = self.resources.mirna_2_prefix
+        if not suffix.startswith('-') and mirna_body + suffix not in names and f'{mirna_body}-{suffix}' in names:
+            return '-' + suffix
+        return suffix
+
     # Very simple heuristic for checking if a mirna hit is a family mirna hit
     def _is_family_sentence(self, sentence_id, normalization_context: NormalizationContext):
         return 'famil' in normalization_context.fetch_sentence(sentence_id=sentence_id).lower()
@@ -220,4 +240,5 @@ class MirIdMapper:
 def normalized_successfully(hit: NormalizedHit) -> bool:
     if not hit.normalization:
         return False
-    return hit.normalization.status in (NormalizationStatus.NORMALIZED, NormalizationStatus.FALLBACK)
+    return hit.normalization.status in (NormalizationStatus.NORMALIZED, NormalizationStatus.FALLBACK,
+                                        NormalizationStatus.ARM_FALLBACK)

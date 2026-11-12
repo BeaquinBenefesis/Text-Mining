@@ -1,8 +1,10 @@
 from dataclasses import dataclass
+from collections import defaultdict
 from typing import Dict, Set
 import re
 import json
 import pandas as pd
+from textmining.db.loaders.mirna_history import version_rank
 
 @dataclass(frozen=True)
 class MirNormalizationResources:
@@ -16,7 +18,33 @@ class MirNormalizationResources:
     taxon_2_prefix: Dict[int, str]
     prefix_regex: re.Pattern
     suffix_regex: re.Pattern
-    
+    # blacklisted mature names whose accessions are all live arms of one precursor -> that precursor's entry
+    arm_switch_precursors: Dict[str, dict]
+
+
+def _arm_switch_precursors(mature_ambiguous: pd.DataFrame, parent_to_child_path,
+                           precursor_normalizer: Dict[str, dict]) -> Dict[str, dict]:
+    p2c = pd.read_csv(parent_to_child_path, sep="\t")
+    parents = defaultdict(set)
+    for parent, child in zip(p2c["parent"], p2c["child"]):
+        if parent.startswith("MI0"):        # precursor -> mature; skips family -> precursor
+            parents[child].add(parent)
+    precursors = {d["accession"]: d for d in precursor_normalizer.values()}
+    # an accession is live if it is live in the latest release it appears in
+    latest = (mature_ambiguous.assign(rank=mature_ambiguous["version"].map(version_rank))
+              .sort_values("rank").groupby("accession").tail(1))
+    dead = dict(zip(latest["accession"], latest["dead"]))
+    result = {}
+    for name, group in mature_ambiguous.groupby("mirna_name"):
+        accessions = set(group["accession"])
+        if any(dead[a] for a in accessions):
+            continue
+        common = set.intersection(*(parents[a] for a in accessions))
+        if len(common) == 1 and (precursor := precursors.get(next(iter(common)))):
+            result[name] = precursor
+    return result
+
+
 class MirResourceLoader:
     @staticmethod
     def load(
@@ -27,6 +55,7 @@ class MirResourceLoader:
         mature_normalizer_path,
         precursor_ambiguous_path,
         mature_ambiguous_path,
+        parent_to_child_path,
     ) -> MirNormalizationResources:
         with open(mirna_2_prefix_path, "r") as f:
             mirna_2_prefix_raw = json.load(f)
@@ -42,9 +71,9 @@ class MirResourceLoader:
         ambiguous_precursors = set(
             pd.read_csv(precursor_ambiguous_path, sep="\t")["mirna_name"]
         )
-        ambiguous_mature = set(
-            pd.read_csv(mature_ambiguous_path, sep="\t")["mirna_name"]
-        )
+        mature_ambiguous = pd.read_csv(mature_ambiguous_path, sep="\t")
+        ambiguous_mature = set(mature_ambiguous["mirna_name"])
+        arm_switch_precursors = _arm_switch_precursors(mature_ambiguous, parent_to_child_path, precursor_normalizer)
         mirna_taxons = pd.read_csv(mirna_taxons_path, sep="\t")
         relevant_taxons = set(mirna_taxons["id"])
         taxon_2_prefix = dict(zip(mirna_taxons["id"], mirna_taxons["prefix"]))
@@ -63,6 +92,7 @@ class MirResourceLoader:
             taxon_2_prefix=taxon_2_prefix,
             prefix_regex=prefix_regex,
             suffix_regex=suffix_regex,
+            arm_switch_precursors=arm_switch_precursors,
         )
     
     @staticmethod

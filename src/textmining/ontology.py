@@ -11,6 +11,7 @@ import io
 import re
 import urllib.request
 import hashlib
+from textmining.enums import SynonymScope
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +52,18 @@ OBO_SYNONYM_RE = re.compile(
     r'^\s*"((?:[^"\\]|\\.)*)"\s+(EXACT|RELATED|BROAD|NARROW)(?:\s+([^\s\[]+))?'
 )
 
-def get_exact_synonyms(node_data: dict) -> tuple[list[str], list[str]]:
-    """EXACT-scope synonyms for a node, split into (synonyms, abbreviations)
+def get_synonyms(node_data: dict,
+                 scopes: Iterable[SynonymScope] = (SynonymScope.EXACT,)) -> tuple[list[str], list[str]]:
+    """Synonyms of a node in any of the given OBO scopes, split into (synonyms, abbreviations)
     by the OBO synonym TYPE field (e.g. "ABBREVIATION") or abbreviation detection criteria."""
+    scopes = {SynonymScope(s) for s in scopes}
     syns, abbrevs = [], []
     for s in node_data.get("synonym", []):
         match = OBO_SYNONYM_RE.match(s)
         if not match:
             continue
         text, scope, syn_type = match.groups()
-        if scope != "EXACT":
+        if scope not in scopes:
             continue
         text = text.replace(r'\"', '"')
         (abbrevs if syn_type in ABBREVIATION_TAGS or (text != node_data.get("name") and probable_abbreviation(text)) else syns).append(text)
@@ -444,10 +447,11 @@ class OntologyGraph:
     
     # Root ids in internal format
     def extract_synonyms(self,
-                         root_ids: Iterator[str] | None = None) -> Iterator[tuple[str, list[str], list[str]]]:
+                         root_ids: Iterator[str] | None = None,
+                         scopes: Iterable[SynonymScope] = (SynonymScope.EXACT,)) -> Iterator[tuple[str, list[str], list[str]]]:
         """Yields (term_id, synonyms, abbreviations) per term. `synonyms`
         always includes the term's name; `abbreviations` is [] for terms
-        with none."""
+        with none. Only synonyms in one of `scopes` are extracted."""
         indices = self._rel_subgraph.node_indices()
         if root_ids:
             indices = self.calculate_descendant_closure(root_ids)
@@ -459,8 +463,8 @@ class OntologyGraph:
             term_id = data.get("id") if data else None
             if not (data and name and term_id):
                 continue
-            exact_syns, abbrevs = get_exact_synonyms(data)
-            syns = sorted({name, *exact_syns})
+            scoped_syns, abbrevs = get_synonyms(data, scopes)
+            syns = sorted({name, *scoped_syns})
             abbrevs = sorted(set(abbrevs))
             term_id_external = to_external_id(term_id)
             results.append((term_id_external, syns, abbrevs))

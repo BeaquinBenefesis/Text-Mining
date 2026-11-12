@@ -4,9 +4,9 @@ import logging
 import urllib.error
 import urllib.request
 import textmining.resources as res
-from textmining.ontology import OntologyGraph
-from textmining.synonym_utils import write_syn_file
-from textmining.enums import HitType
+from textmining.ontology import OntologyGraph, to_external_id
+from textmining.synonym_utils import write_syn_file, drop_shadowed, case_sensitive_abbreviations, CASE_SENS_TAG
+from textmining.enums import HitType, SynonymScope
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,6 @@ def _prompt_rebuild(source: "res.OntologySource", old_hash: str | None, new_hash
 
 
 def refresh_ontology(source: "res.OntologySource", offline: bool = False) -> OntologyGraph | None:
-    """The one primitive: fetch/hash/compare/prompt/rebuild for a single
-    OntologySource. See refresh_data_notes.txt for the agreed flow. Returns
-    the rebuilt OntologyGraph, or None if nothing was rebuilt (up to date,
-    offline with an existing cache, or rebuild declined)."""
     cached = OntologyGraph.load(source.cache_path) if source.cache_path.exists() else None
 
     roots_changed = cached is not None and not cached.built_with(source.roots, source.relationships)
@@ -69,18 +65,40 @@ def refresh_ontology(source: "res.OntologySource", offline: bool = False) -> Ont
 
 
 def refresh_synonyms(source: "res.OntologySource", graph: OntologyGraph) -> None:
-    """Re-extract every ExtractedSynonymSpec registered for this HitType from
-    the freshly rebuilt graph. HitTypes with no entry in EXTRACTABLE_SYNONYMS
-    (e.g. TAXON, whose .syn files are static LINNAEUS dictionaries) are a
-    silent no-op."""
     for spec in res.EXTRACTABLE_SYNONYMS.get(source.hit_type, []):
-        triples = list(graph.extract_synonyms(spec.roots))
+        # the root terms stay in the graph, only their names are kept out of the synonym files
+        excluded_ids = set() if spec.include_roots else {to_external_id(r) for r in spec.roots or ()}
+        triples = [t for t in graph.extract_synonyms(spec.roots, scopes=spec.scopes) if t[0] not in excluded_ids]
+        if excluded_ids:
+            logger.info("%s: left out root term(s) %s", source.hit_type.name, sorted(excluded_ids))
+        if set(spec.scopes) != {SynonymScope.EXACT}:
+            # a looser-scope synonym must not shadow the label or EXACT synonym of another term
+            authoritative = [t for t in graph.extract_synonyms(spec.roots, scopes=(SynonymScope.EXACT,))
+                             if t[0] not in excluded_ids]
+            triples, dropped = drop_shadowed(triples, authoritative)
+            dropped_path = spec.output_path.with_suffix('.dropped.tsv')
+            with open(dropped_path, 'w') as out:
+                out.write('term_id\tsynonym\tauthoritative_term_ids\n')
+                out.writelines('\t'.join(row) + '\n' for row in dropped)
+            logger.info("%s: dropped %d synonym(s) shadowing another term's label or EXACT synonym -> %s",
+                        source.hit_type.name, len(dropped), dropped_path)
         write_syn_file(spec.output_path, ((term_id, syns) for term_id, syns, _ in triples))
-        write_syn_file(
-            spec.abbreviation_output_path,
-            ((term_id, abbrevs) for term_id, _, abbrevs in triples if abbrevs),
-        )
-        logger.info("%s: re-extracted synonyms -> %s", source.hit_type.name, spec.output_path)
+        abbrev_groups, dropped_abbrevs = [], []
+        for term_id, _, abbrevs in triples:
+            kept, dropped = case_sensitive_abbreviations(abbrevs)
+            dropped_abbrevs.extend((term_id, a) for a in dropped)
+            if kept:
+                abbrev_groups.append((term_id, kept))
+        write_syn_file(spec.abbreviation_output_path, abbrev_groups)
+        dropped_path = spec.abbreviation_output_path.with_suffix('.dropped.tsv')
+        with open(dropped_path, 'w') as out:
+            out.write('term_id\tabbreviation\n')
+            out.writelines(f'{term_id}\t{a}\n' for term_id, a in dropped_abbrevs)
+        n_tagged = sum(a.endswith(CASE_SENS_TAG) for _, kept in abbrev_groups for a in kept)
+        logger.info("%s: %d abbreviation(s) tagged case-sensitive, %d lowercase duplicate(s) dropped -> %s",
+                    source.hit_type.name, n_tagged, len(dropped_abbrevs), dropped_path)
+        logger.info("%s: re-extracted synonyms (scopes %s) -> %s", source.hit_type.name,
+                    [s.value for s in spec.scopes], spec.output_path)
         logger.info("%s: re-extracted abbreviations -> %s", source.hit_type.name, spec.abbreviation_output_path)
 
 
@@ -95,6 +113,10 @@ def main():
     parser.add_argument(
         "--only", nargs="+", metavar="HIT_TYPE",
         help="Restrict to these HitType names instead of refreshing every registered source",
+    )
+    parser.add_argument(
+        "--rewrite-synonyms", action="store_true",
+        help="Re-extract the synonym files also for unchanged ontologies, e.g. after a change to the synonym rules",
     )
     args = parser.parse_args()
 
@@ -111,6 +133,8 @@ def main():
     for source in sources:
         try:
             graph = refresh_ontology(source, offline=args.offline)
+            if graph is None and args.rewrite_synonyms and source.hit_type in res.EXTRACTABLE_SYNONYMS:
+                graph = OntologyGraph.load(source.cache_path)
             if graph is not None:
                 refresh_synonyms(source, graph)
         except urllib.error.HTTPError as e:

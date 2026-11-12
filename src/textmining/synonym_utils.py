@@ -1,9 +1,11 @@
 import mmap
 import time
 import logging
-from typing import Iterator
+from typing import Iterator, Iterable
+from collections import defaultdict
 from pathlib import Path
 from dataclasses import dataclass
+from textmining.enums import SynonymScope
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,45 @@ def write_syn_file(output: str | Path,
             line = create_syn_line(group)
             out.write(line)
             out.write('\n')
+
+
+def drop_shadowed(triples: Iterable[tuple[str, list[str], list[str]]],
+                  authoritative: Iterable[tuple[str, list[str], list[str]]]
+                  ) -> tuple[list[tuple[str, list[str], list[str]]], list[tuple[str, str, str]]]:
+    """what"""
+    owners = defaultdict(set)
+    for term_id, syns, _ in authoritative:
+        for s in syns:
+            owners[s.casefold()].add(term_id)
+
+    kept_triples, dropped = [], []
+    for term_id, syns, abbrevs in triples:
+        kept = []
+        for s in syns:
+            name_owners = owners.get(s.casefold(), set())
+            # a name that is authoritative for this term too stays, also when terms share it
+            if name_owners and term_id not in name_owners:
+                dropped.append((term_id, s, ','.join(sorted(name_owners))))
+            else:
+                kept.append(s)
+        kept_triples.append((term_id, kept, abbrevs))
+    return kept_triples, dropped
+
+
+CASE_SENS_TAG = "@CASE_SENS"
+
+
+def add_case_sensitivity(synonym: str) -> str:
+    if len(synonym) < 8 and synonym.isascii() and synonym.isalpha():
+        return synonym + CASE_SENS_TAG
+    return synonym
+
+
+def case_sensitive_abbreviations(abbrevs: list[str]) -> tuple[list[str], list[str]]:
+    cased = {a.lower() for a in abbrevs if not a.islower()}
+    kept = [a for a in abbrevs if not (a.islower() and a in cased)]
+    dropped = [a for a in abbrevs if a.islower() and a in cased]
+    return [add_case_sensitivity(a) for a in kept], dropped
 
 
 def create_syn_line(id_to_syns: tuple[str, list[str]]):
@@ -119,7 +160,13 @@ class ExtractedSynonymSpec:
     Only used by refresh_data.py to know what to regenerate after an
     ontology rebuild. Synonym files
     with no clean root, or not derived from an .obo at all (e.g. TAXON's
-    LINNAEUS-derived files), simply have no entry here."""
+    LINNAEUS-derived files), simply have no entry here.
+    `scopes` are the OBO synonym scopes to extract; ontologies differ in
+    which scope they file their usable synonyms under.
+    The root terms themselves ("pathway", "cell", "disease") have an information
+    content of 0 and are left out of the synonym files unless `include_roots`."""
     output_path: Path
     abbreviation_output_path: Path
     roots: list[str] | None = None
+    scopes: tuple[SynonymScope, ...] = (SynonymScope.EXACT,)
+    include_roots: bool = False

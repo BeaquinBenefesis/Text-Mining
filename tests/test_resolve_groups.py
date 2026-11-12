@@ -1,4 +1,4 @@
-"""Unit tests for HitProcessor._resolve_groups (see DISAMBIGUATION_DESIGN.md).
+"""Unit tests for HitProcessor._resolve_groups (see notes/DISAMBIGUATION_DESIGN.md).
 
 Run from the repo root:  python -m unittest discover -s tests -v
 """
@@ -7,7 +7,7 @@ import unittest
 
 from textmining.article_utils import ArticleEvidence
 from textmining.enums import GroupStatus, HitType, SynonymType
-from textmining.hit_utils import HitProcessor, HitProcessorHistory
+from textmining.hit_utils import HitProcessor, HitProcessorHistory, LcaResolver
 from textmining.models import CandidateHit, HitGroup
 from textmining.ontology import OntologyGraph
 
@@ -42,9 +42,10 @@ class StubMirNormalizer:
 
 
 def make_processor(type_to_ontology=None):
-    # __init__ parses syngrep map files; resolution only needs these three attributes
+    # __init__ parses syngrep map files; resolution only needs these attributes
     p = HitProcessor.__new__(HitProcessor)
-    p.type_to_ontology = GRAPHS if type_to_ontology is None else type_to_ontology
+    graphs = GRAPHS if type_to_ontology is None else type_to_ontology
+    p.resolvers = {t: LcaResolver(g) for t, g in graphs.items()}
     p.mir_normalizer = StubMirNormalizer()
     p.history = HitProcessorHistory()
     return p

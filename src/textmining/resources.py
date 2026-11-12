@@ -2,6 +2,7 @@ import dataclasses
 from pathlib import Path
 from dataclasses import dataclass, field
 from textmining.models import HitType
+from textmining.enums import SynonymScope
 from textmining import external
 from textmining.synonym_utils import ExtractedSynonymSpec
 
@@ -19,6 +20,15 @@ TISSUE_OBO = ONTOLOGIES_DIR / "brenda_tissue_ontology.obo"
 PATHWAY_OBO = ONTOLOGIES_DIR / "pathway_ontology.obo"
 GO_OBO = ONTOLOGIES_DIR / "gene_ontology.obo"
 
+## GENE DATA
+# gene id -> taxon id of its organism, in the id format of TAXON hits (NCBITaxon_9606)
+GENE_TAXON_MAP = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/gene/synonym_taxon_map.json")
+GENE_STOPLIST = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/gene/genes.stoplist")
+# gene id -> common name of its organism (human, mouse, rat, fly, bovine, yeast), shown in the UI
+GENE_ORGANISM_MAP = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/gene/synonym_organism_map.json")
+# unfiltered dictionary GENE_SYNS is built from (analysis/genes.ipynb); its first synonym is the gene symbol
+GENE_SYNS_RAW = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/gene/genes.syn")
+
 @dataclass(frozen=True)
 class OntologySource:
     hit_type: HitType
@@ -32,7 +42,7 @@ class OntologySource:
     relationships: tuple[str, ...] = ('is_a',)
 
 ONTOLOGY_ROOTS: dict[HitType, tuple[str, ...]] = {
-    HitType.DISEASE: ('MONDO:0000001',),
+    HitType.DISEASE: ('MONDO:0700096',),
     HitType.TAXON: ('NCBITaxon:131567', 'NCBITaxon:10239'),
     HitType.CELL: ('CL:0000000',),
     # whole body, whole plant. BTO organises anatomy mainly by part_of (design notes 13.2).
@@ -79,13 +89,17 @@ PATHWAY_SYNS = SYNONYM_DIR / "pw.syn"
 PATHWAY_ABBREV = SYNONYM_DIR / "pathway_abbreviations.syn"
 BIOLOGICAL_PROCESS_SYNS = SYNONYM_DIR / "go.syn"
 BIOLOGICAL_PROCESS_ABBREV = SYNONYM_DIR / "biological_process_abbreviations.syn"
+GENE_SYNS = SYNONYM_DIR / "genes_filtered.syn"
 
+
+# BTO and PW file nearly all of their synonyms under RELATED, the other ontologies under EXACT
+_EXACT_AND_RELATED = (SynonymScope.EXACT, SynonymScope.RELATED)
 
 EXTRACTABLE_SYNONYMS: dict[HitType, list[ExtractedSynonymSpec]] = {
     HitType.DISEASE:  [ExtractedSynonymSpec(output_path=DISEASE_SYNS, abbreviation_output_path=DISEASE_ABBREV, roots=ONTOLOGY_ROOTS[HitType.DISEASE])],
     HitType.CELL:     [ExtractedSynonymSpec(output_path=CELL_SYNS, abbreviation_output_path=CELL_ABBREV, roots=ONTOLOGY_ROOTS[HitType.CELL])],
-    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, abbreviation_output_path=TISSUE_ABBREV, roots=ONTOLOGY_ROOTS[HitType.TISSUE])],
-    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, abbreviation_output_path=PATHWAY_ABBREV, roots=ONTOLOGY_ROOTS[HitType.PATHWAY])],
+    HitType.TISSUE:   [ExtractedSynonymSpec(TISSUE_SYNS, abbreviation_output_path=TISSUE_ABBREV, roots=ONTOLOGY_ROOTS[HitType.TISSUE], scopes=_EXACT_AND_RELATED)],
+    HitType.PATHWAY:  [ExtractedSynonymSpec(PATHWAY_SYNS, abbreviation_output_path=PATHWAY_ABBREV, roots=ONTOLOGY_ROOTS[HitType.PATHWAY], scopes=_EXACT_AND_RELATED)],
     HitType.BIOLOGICAL_PROCESS: [ExtractedSynonymSpec(BIOLOGICAL_PROCESS_SYNS, abbreviation_output_path=BIOLOGICAL_PROCESS_ABBREV, roots=ONTOLOGY_ROOTS[HitType.BIOLOGICAL_PROCESS])],
 }
 
@@ -111,6 +125,12 @@ MIR_TEST_SENTS = Path("/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining
 
 ## VALIDATION
 HMDD_SENTS = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/HMDD/associations.sent")
+HMDD_DATA = Path("/mnt/raidbio2/extstud/studtemp/mitsopoulos/HMDD/alldata_v4.txt")
+
+
+## MESH DATA
+MESH_PATH = Path('/mnt/raidbio2/extproj/projekte/textmining/mirnaTextmining/mirClassification/data/mesh/desc2026')
+
 
 def validate_resource(path: Path):
     if not path.exists():
@@ -141,3 +161,7 @@ def validate_paths(value):
 ## METADATA
 PUBMED_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pubmed_metadata.csv")
 PMC_METADATA = Path("/mnt/raidbio2/extdata/textmining/master/pmc_metadata.csv")
+
+
+## PUBMEDBERT DATA
+PUBMEDBERT_DIR = Path("/mnt/extstudtemp/mitsopoulos/Text-Mining/data/models/relation_pubmedbert")

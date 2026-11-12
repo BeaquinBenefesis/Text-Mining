@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ArticleEvidence:
     unambiguous_entity_ids: Optional[set[str]] = field(default_factory=set)
+    # taxa mentioned in the article, including their ancestors
+    taxon_ids: set[str] = field(default_factory=set)
 
 @dataclass
 class ArticleMetadata:

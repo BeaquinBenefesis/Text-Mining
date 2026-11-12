@@ -54,20 +54,10 @@ class Processor:
             self.core_history.print_summary()
 
     def _build_normalization_context(self, article: ArticleRecord) -> NormalizationContext:
-        # article.hits (not resolved_hits) is guaranteed non-empty (HitProcessor.create_article
-        # raises on an empty buffer); resolved_hits can be empty if every group failed
-        # disambiguation, so origin_file_name is read off the raw hits instead.
         origin_file_name = article.hits[0].origin_file_name
         article_id = article.metadata.article_id
-
-        # Deferred: fetch_article is only called the first time some normalizer actually
-        # asks for sentence text (e.g. MirNormalizer's family-sentence check), and the
-        # result is cached by NormalizationContext for the rest of this article.
         fetch = lambda: self.article_reader.fetch_article(origin_file_name, article_id)
-        context = NormalizationContext(fetch_article=fetch)
-        for hit in article.resolved_hits:
-            context.add_hit(hit)
-        return context
+        return NormalizationContext(fetch_article=fetch, taxon_ids=article.evidence.taxon_ids)
             
 
 @dataclass

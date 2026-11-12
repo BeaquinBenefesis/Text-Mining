@@ -1,12 +1,10 @@
 from dataclasses import dataclass, field, replace
 from typing import Optional
-from collections import defaultdict
 from textmining.scoring import HitScore
 from textmining.sentence_utils import parse_sentence_id
-from textmining.enums import HitType, SynonymType, GroupStatus, NormalizationStatus, NormalizationTargetType
+from textmining.enums import HitType, SynonymType, GroupStatus, NormalizationStatus, NormalizationTargetType, Label
 from textmining.scoring import section_weigth
 from math import log2
-
 
 @dataclass(kw_only=True)
 class CandidateHit:
@@ -90,12 +88,29 @@ class CoOccurence:
     normalized_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
     entity_positions: tuple[tuple[int, int], tuple[int, int]] # (start, end) end exclusive
-    weight: int = 1
-    
+    weight: float = 1
+
     @property
     def score(self):
         return self.weight * section_weigth(self.section_num)
 
+    @property
+    def mention_key(self):
+        """The two mentions, whatever ids they were normalized to. One mention pair
+        yields one co-occurrence per id combination, and all of them share one PairLabels."""
+        return (self.sentence_id, self.entity_positions, self.entity_types[1])
+
+@dataclass
+class PairLabels:
+    """Relation label probabilities of one mention pair."""
+    sentence_id: str
+    entity_positions: tuple[tuple[int, int], tuple[int, int]] # (mirna, term), as in CoOccurence
+    term_type: HitType
+    probabilities: Optional[dict[Label, float]] # None if the pair could not be labelled
+
+    @property
+    def mention_key(self):
+        return (self.sentence_id, self.entity_positions, self.term_type)
 
 @dataclass
 class AssociationEvidence:
@@ -107,23 +122,29 @@ class AssociationEvidence:
     _current_article_id: Optional[str] = None   # kept for diagnostics only
     _current_article_sum: float = 0.0
     _corpus_sum: float = 0.0
+    _n_articles: int = 0
+    _n_direct_articles: int = 0
+    _current_article_has_direct_evidence: bool = False
 
 
-    def record_cooccurrence_score(self, article_epoch, article_id, cooc_score):
+    def record_cooccurrence_score(self, article_epoch, article_id, cooc_score, is_inferred):
         self._check_epoch(article_epoch, article_id)
-        self._attempt_flush(article_epoch, article_id)
-        self._current_article_sum += cooc_score
-        
-    def _attempt_flush(self, article_epoch, article_id):
         if article_epoch != self._current_article_epoch:
             self._flush_article_evidence()
             self._current_article_epoch = article_epoch
             self._current_article_id = article_id
-        
+        if not is_inferred:
+            self._current_article_has_direct_evidence = True
+        self._current_article_sum += cooc_score
+                
     def _flush_article_evidence(self):
         if self._current_article_epoch >= 0:
             self._corpus_sum += log2(1 + self._current_article_sum)
+            self._n_articles += 1
+            self._n_direct_articles += self._current_article_has_direct_evidence
         self._current_article_sum = 0.0
+        self._current_article_has_direct_evidence = False
+
     
     def _check_epoch(self, article_epoch, article_id):
         if article_epoch < self._current_article_epoch:
@@ -133,9 +154,23 @@ class AssociationEvidence:
                 f'({self._current_article_id})'
             )
     @property
-    def score(self):
+    def evidence_mass(self):
+        """E: sum of the per-article log2(1 + s_a), before the outer log. Weightings
+        applied at query time act on this, so the outer log never has to be undone."""
         pending = log2(1 + self._current_article_sum)
-        return log2(1 + self._corpus_sum + pending)
+        return self._corpus_sum + pending
+
+    @property
+    def score(self):
+        return log2(1 + self.evidence_mass)
+
+    @property
+    def n_articles(self):
+        return self._n_articles + 1
+    
+    @property
+    def n_direct_articles(self):
+        return self._n_direct_articles + 1 if self._current_article_has_direct_evidence else self._n_direct_articles
     
 
 
@@ -145,12 +180,24 @@ class Association:
     entity_types: tuple[HitType, HitType]
     evidence: AssociationEvidence = field(default_factory=lambda: AssociationEvidence())
 
-    def record_cooccurrence_score(self, article_epoch, article_id, cooc_score):
-        self.evidence.record_cooccurrence_score(article_epoch, article_id, cooc_score)
+    def record_cooccurrence_score(self, article_epoch, article_id, cooc_score, is_inferred):
+        self.evidence.record_cooccurrence_score(article_epoch, article_id, cooc_score, is_inferred)
     
     @property
     def score(self):
         return self.evidence.score
+
+    @property
+    def evidence_mass(self):
+        return self.evidence.evidence_mass
+
+    @property
+    def n_articles(self):
+        return self.evidence.n_articles
+    
+    @property
+    def n_direct_articles(self):
+        return self.evidence.n_direct_articles
         
 @dataclass(kw_only=True)
 class NormalizedHit(CandidateHit):
@@ -200,26 +247,12 @@ class NormalizedHit(CandidateHit):
         }
         
 class NormalizationContext:
-    def __init__(self, fetch_article):
-        self._buffers = defaultdict(list)
-        self._taxon_cache = None
+    def __init__(self, fetch_article, taxon_ids: set[str] = frozenset()):
+        # taxa of the article with their ancestors, shared with ArticleEvidence.taxon_ids
+        self.taxon_ids = taxon_ids
         self._fetch_article = fetch_article
         self._article_cache = None
-    
-    def add_hit(self, hit: CandidateHit):
-        self._buffers[hit.entity_type].append(hit)
-    
-    def hits_of(self, hit_type):
-        return self._buffers.get(hit_type, [])
-    
-    def get_taxon_relevance(self):
-        if self._taxon_cache is not None:
-            return self._taxon_cache
-        tax_buffer = self._buffers[HitType.TAXON]
-        relevance = {tax.entity_id : 1 for tax in tax_buffer}
-        self._taxon_cache = relevance
-        return relevance
-    
+
     def fetch_sentence(self, sentence_id):
         if not self._article_cache:
             self._article_cache = self._fetch_article()
@@ -227,8 +260,3 @@ class NormalizationContext:
         if not sentence:
             raise ValueError(f'Unknown sentence id for provided article: {sentence_id}')
         return sentence
-    
-    def clear(self):
-        self._buffers = defaultdict(list)
-        self._taxon_cache = None
-        self._article_cache = None

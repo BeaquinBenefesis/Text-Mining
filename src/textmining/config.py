@@ -1,9 +1,11 @@
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 import textmining.resources as res
 from textmining.mirbase import load_mirbase
 from textmining.enums import HitType
 from textmining.ontology import OntologyGraph
+from textmining.hit_utils import GroupResolver, LcaResolver, GeneResolver
 from textmining.normalization import MirNormalizer, DefaultNormalizer
 from textmining.normalization_resources import MirResourceLoader
 from textmining.syngrep import SynGrepResult
@@ -41,11 +43,15 @@ class EntityConfig():
     within_word: list[Path] = field(default_factory=list)
     abbrev_synonyms: list[Path] = field(default_factory=list)
 
-    def get_graph(self):
+    def get_graph(self) -> OntologyGraph | None:
         source = res.ONTOLOGY_SOURCES.get(self.entity_type)
         if not source:
             raise ValueError(f'No ontology source stored for entity type: {self.entity_type}')
         return OntologyGraph.from_source(source)
+
+    # Chooses among several ids of this type at one span. graph is the result of get_graph()
+    def get_resolver(self, graph: OntologyGraph | None) -> GroupResolver | None:
+        return LcaResolver(graph) if graph is not None else None
 
     def get_normalizer(self) -> DefaultNormalizer:
         return DefaultNormalizer()
@@ -83,8 +89,13 @@ class MirConfig(EntityConfig):
             mature_normalizer_path=self.mirbase.mature_norm_path,
             precursor_ambiguous_path=self.mirbase.precursor_ambi_path,
             mature_ambiguous_path=self.mirbase.mature_ambi_path,
+            parent_to_child_path=self.mirbase.parent_to_child_path,
         )
         return MirNormalizer(norm_resources)
+
+    # miRNA ids are regex tokens, not graph ids. They are settled by the normalizer
+    def get_resolver(self, graph=None):
+        return None
 
 @dataclass
 class TaxonConfig(EntityConfig):
@@ -121,6 +132,23 @@ class BpConfig(EntityConfig):
     synonyms: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_SYNS])
     abbrev_synonyms: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_ABBREV])
     no_abbrev: list[Path] = field(default_factory=lambda:[res.BIOLOGICAL_PROCESS_ABBREV])
+
+@dataclass
+class GeneConfig(EntityConfig):
+    entity_type: HitType = HitType.GENE
+    synonyms: list[Path] = field(default_factory=lambda:[res.GENE_SYNS])
+    taxon_map: Path = res.GENE_TAXON_MAP
+    # organism assumed when none of a gene name's organisms is mentioned in the article.
+    # None leaves such names unresolved
+    default_taxon: str | None = None
+
+    def get_graph(self):
+        return None
+
+    def get_resolver(self, graph=None) -> GeneResolver:
+        with open(self.taxon_map) as f:
+            gene_to_taxon = json.load(f)
+        return GeneResolver(gene_to_taxon, default_taxon=self.default_taxon)
 
 
 @dataclass(kw_only=True)
@@ -182,12 +210,17 @@ class CompletePipelineConfig(PipelineConfig):
                                                                       TissueConfig(),
                                                                       CellConfig(),
                                                                       PathwayConfig(),
-                                                                      BpConfig()])
+                                                                      BpConfig(),
+                                                                      GeneConfig()])
 
 @dataclass(kw_only=True)
 class MirnaDiseasePipelineConfig(PipelineConfig):
     entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), TaxonConfig(), DiseaseConfig()])
     
+@dataclass(kw_only=True)
+class MirnaGenePipelineConfig(PipelineConfig):
+    entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), TaxonConfig(), GeneConfig()])
+
 @dataclass(kw_only=True)
 class MirnaExistingSyngrepPipelineConfig(ExistingSyngrepPipelineConfig):
     entity_configs: list[EntityConfig] = field(default_factory=lambda:[MirConfig(), TaxonConfig()])

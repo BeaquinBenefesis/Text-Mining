@@ -3,6 +3,7 @@ import os
 import tempfile
 import shutil
 import glob
+from abc import ABC, abstractmethod
 import logging
 from typing import Iterator, Optional
 from collections import Counter, defaultdict
@@ -11,7 +12,7 @@ from pathlib import Path
 from textmining.enums import HitType, SynonymType, GroupStatus
 from textmining.models import HitGroup, CandidateHit
 from textmining.article_utils import ArticleRecord, ArticleEvidence, ArticleMetadata, ArticleSource
-from textmining.ontology import OntologyGraph
+from textmining.ontology import OntologyGraph, to_internal_id
 from textmining.synonym_utils import MultiSynFileReader
 from textmining.analysis import overlapping_pair, contained_pair
 from textmining.normalization import MirNormalizer
@@ -29,7 +30,7 @@ class HitProcessor:
                  hits_path: str,
                  synfile_map: str,
                  synfile_type_map: str,
-                 type_to_ontology: dict[HitType, OntologyGraph],
+                 resolvers: dict[HitType, 'GroupResolver'],
                  low_memory=False,
                  mir_normalizer: Optional[MirNormalizer] = None):
 
@@ -37,7 +38,8 @@ class HitProcessor:
         self.low_memory = low_memory
         self.type_map = HitProcessor.parse_synfile_type_map(synfile_type_map)
         self.synfile_map = HitProcessor.parse_synfile_map(synfile_map)
-        self.type_to_ontology = type_to_ontology
+        # Everything type-specific about ids. Types without a resolver (miRNA) keep their ids as read
+        self.resolvers = resolvers
         self.mir_normalizer = mir_normalizer
         self.history = HitProcessorHistory()
         logger.info(
@@ -98,7 +100,7 @@ class HitProcessor:
             hit_groups = HitProcessor._group_hits_by_span(article_hits)
             hit_groups = HitProcessor._drop_contained_groups(hit_groups)
             article_metadata = ArticleMetadata(article_id=article_hits[0].article_id)
-            article_evidence = HitProcessor._collect_article_evidence(hit_groups=hit_groups)
+            article_evidence = self._collect_article_evidence(hit_groups=hit_groups)
             resolved_hits = self._resolve_groups(hit_groups=hit_groups, article_evidence=article_evidence)
             return ArticleRecord(metadata=article_metadata, 
                                 hits=article_hits, 
@@ -155,9 +157,8 @@ class HitProcessor:
             
             filtered_hits = None
             if g.contains_inferred_abbreviation():
-                # An in-text definition exists: drop dictionary abbreviations of every type.
-                # Standard and inferred hits of every type are kept.
-                filtered_hits = [h for h in g.hits if h.synonym_type != SynonymType.ABBREVIATION]
+                # keep only inferred abbreviations
+                filtered_hits = [h for h in g.hits if h.synonym_type == SynonymType.INFERRED_ABBREVIATION]
             elif g.contains_abbreviation():
                 filtered_hits = [h for h in g.hits 
                                  if (h.synonym_type != SynonymType.ABBREVIATION) 
@@ -198,14 +199,13 @@ class HitProcessor:
             for h in filtered_hits:
                 hits_by_type[h.entity_type].append(h)
             
-            
             statuses = set()
             accepted_types = []
             for hits in hits_by_type.values():
-                hit, status = self._resolve_single_type(hits, article_evidence)
-                if hit is not None:
-                    resolved_hits.append(hit)
-                    accepted_types.append(hit.entity_type)
+                type_hits, status = self._resolve_single_type(hits, article_evidence)
+                if type_hits:
+                    resolved_hits.extend(type_hits)
+                    accepted_types.append(type_hits[0].entity_type)
                 statuses.add(status)
             
             if len(statuses) == 1:
@@ -234,42 +234,32 @@ class HitProcessor:
             self.history.record_output_hit(r)
         return resolved_hits
     
-    def _resolve_single_type(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[Optional[CandidateHit], GroupStatus]:
-        ids = {h.entity_id for h in hits}
-        
-        if len(ids) == 1:
-            return next(h for h in hits if h.entity_id in ids), GroupStatus.RESOLVED
-        
-        supported = ids & evidence.unambiguous_entity_ids
-        
-        if len(supported) == 1:
-            return next(h for h in hits if h.entity_id in supported), GroupStatus.RESOLVED
-        
+    def _resolve_single_type(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[list[CandidateHit], GroupStatus]:
         entity_type = hits[0].entity_type
-        ontology = self.type_to_ontology.get(entity_type, None)
-        
-        if not ontology:
-            logger.warning("No ontology configured for entity_type=%s; leaving part AMBIGUOUS_ID", entity_type)
-            return None, GroupStatus.AMBIGUOUS_ID
-        
-        lca = ontology.find_lca(*ids)
-        if lca is None:
-            logger.debug("No LCA found for ids=%s (type=%s)", ids, entity_type)
-            return None, GroupStatus.AMBIGUOUS_ID
-        
-        template = hits[0]
-        inferred_hit = template.copy(entity_id=lca)
-        logger.debug("Resolved part via LCA: ids=%s -> lca=%s (type=%s)", ids, lca, entity_type)
-        return inferred_hit, GroupStatus.RESOLVED
-        
-            
-        
-                    
-    @staticmethod
-    def _collect_article_evidence(hit_groups: list[HitGroup]) -> ArticleEvidence:
+        resolver = self.resolvers.get(entity_type)
+        if resolver is None:
+            logger.warning("No resolver configured for entity_type=%s; leaving part AMBIGUOUS_ID", entity_type)
+            return [], GroupStatus.AMBIGUOUS_ID
+        return resolver.resolve(hits, evidence)
+
+    def _collect_article_evidence(self, hit_groups: list[HitGroup]) -> ArticleEvidence:
         unambiguous_entity_ids = {g.get_first().entity_id for g in hit_groups 
                             if not g.is_ambiguous() and g.get_first().synonym_type != SynonymType.ABBREVIATION}
-        return ArticleEvidence(unambiguous_entity_ids=unambiguous_entity_ids)
+        return ArticleEvidence(unambiguous_entity_ids=unambiguous_entity_ids,
+                               taxon_ids=self._collect_taxon_ids(hit_groups))
+
+    # Taxa of the article, each with its ancestors, so that a strain or subspecies
+    # also counts as its species. Every candidate id of a taxon-only group is used:
+    # "mice" is ambiguous between Mus musculus and Mus sp. and would otherwise not count.
+    def _collect_taxon_ids(self, hit_groups: list[HitGroup]) -> set[str]:
+        taxon_resolver = self.resolvers.get(HitType.TAXON)
+        taxon_ids = set()
+        for g in hit_groups:
+            if any(h.entity_type != HitType.TAXON or h.synonym_type == SynonymType.ABBREVIATION for h in g.hits):
+                continue
+            for h in g.hits:
+                taxon_ids |= taxon_resolver.lineage(h.entity_id) if taxon_resolver else {h.entity_id}
+        return taxon_ids
         
     
     # Find hits mapping to exactly the same positions
@@ -334,18 +324,17 @@ class HitProcessor:
             
     
     def _resolve_syngrep_hits_entity_ids(self, hit_stream: Iterator[CandidateHit]) -> Iterator[CandidateHit]:
-        entity_id = None
         for hit in hit_stream:
-            if hit.entity_type == HitType.MIR:
+            resolver = self.resolvers.get(hit.entity_type)
+            if resolver is None:
                 yield hit
-            else:
-                entity_id = self.type_to_ontology[hit.entity_type].resolve_id(hit.entity_id)
-                if not entity_id:
-                    logger.error('Could not resolve id: %s', hit.entity_id)
-                    continue
-                else:
-                    hit.entity_id = entity_id
-                    yield hit
+                continue
+            entity_id = resolver.canonical_id(hit.entity_id)
+            if not entity_id:
+                logger.error('Could not resolve id: %s', hit.entity_id)
+                continue
+            hit.entity_id = entity_id
+            yield hit
     
     @staticmethod
     def _iter_syngrep_hits(hits_path: str | Path,
@@ -388,6 +377,9 @@ class HitProcessor:
                     continue
                 elif is_inferred_abbrev:
                     synonym_type = SynonymType.INFERRED_ABBREVIATION
+                    # skip junk abbreviations produced by relaxed matching
+                    if len(matched_text) < 2 or matched_text.isdigit():
+                        continue
                 elif is_abbrev:
                     synonym_type = SynonymType.ABBREVIATION
                 else:
@@ -502,7 +494,7 @@ class HitProcessorHistory:
     multi_candidate_resolved: int = 0        # of those, how many ended up resolved (see RESOLVED_STATUSES)
     group_size_counts: Counter = field(default_factory=Counter)   # {group size: number of groups}
     group_status_counts: Counter = field(default_factory=Counter) # {GroupStatus: count}
-    # {hits emitted by one group: number of groups}; > 1 only for split multi-type groups
+    # {hits emitted by one group: number of groups}; > 1 for split multi-type groups and genes kept for several organisms
     emitted_hits_per_group_counts: Counter = field(default_factory=Counter)
 
     ambiguous_synonym_counts: Counter = field(default_factory=Counter)   # synonym -> times it produced an ambiguous group
@@ -678,3 +670,101 @@ class HitProcessorHistory:
             emit(f"Top {top_n} Synonyms Unresolved due to {status.value}:")
             for synonym, count in top:
                 emit(f"  {synonym!r:<30}: {count}")
+
+
+class GroupResolver(ABC):
+    # Chooses among same-type candidates of one span. Returns the hits to emit
+    # (several only when a resolver deliberately keeps more than one id) and the status
+    @abstractmethod
+    def resolve(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[list[CandidateHit], GroupStatus]:
+        ...
+
+    # Canonical form of an id read from a synonym file. None if the id is unknown
+    def canonical_id(self, entity_id: str) -> Optional[str]:
+        return entity_id
+
+    def lineage(self, entity_id: str) -> set[str]:
+        return {entity_id}
+    
+    def check_trivial(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[list[CandidateHit], GroupStatus] | None:
+        ids = {h.entity_id for h in hits}
+                
+        if len(ids) == 1:
+            return [hits[0]], GroupStatus.RESOLVED
+        
+        supported = ids & evidence.unambiguous_entity_ids
+        
+        if len(supported) == 1:
+            return [next(h for h in hits if h.entity_id in supported)], GroupStatus.RESOLVED
+        
+        return None
+
+class LcaResolver(GroupResolver):
+    
+    def __init__(self, ontology: OntologyGraph):
+        self.ontology = ontology
+        self._lineage_cache: dict[str, set[str]] = {}
+
+    def canonical_id(self, entity_id: str) -> Optional[str]:
+        return self.ontology.resolve_id(entity_id)
+
+    def lineage(self, entity_id: str) -> set[str]:
+        lineage = self._lineage_cache.get(entity_id)
+        if lineage is None:
+            idx = self.ontology.map_to_index(to_internal_id(entity_id))
+            lineage = {entity_id} | {self.ontology.map_idx_to_external_id(a) for a in self.ontology.ancestors(idx)}
+            self._lineage_cache[entity_id] = lineage
+        return lineage
+    
+    def resolve(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[list[CandidateHit], GroupStatus]:
+        trivial_res = self.check_trivial(hits, evidence)
+        if trivial_res is not None:
+            return trivial_res
+        
+        ids = {h.entity_id for h in hits}
+        lca = self.ontology.find_lca(*ids)
+        if lca is None:
+            logger.debug("No LCA found for ids=%s", ids)
+            return [], GroupStatus.AMBIGUOUS_ID
+        
+        template = hits[0]
+        inferred_hit = template.copy(entity_id=lca)
+        logger.debug("Resolved part via LCA: ids=%s -> lca=%s", ids, lca)
+        return [inferred_hit], GroupStatus.RESOLVED
+
+
+class GeneResolver(GroupResolver):
+    
+    # gene_to_taxon values must use the same id format as evidence.taxon_ids.
+    # default_taxon is used when none of the candidate organisms is mentioned in
+    # the article. None leaves such groups AMBIGUOUS_ID.
+    def __init__(self, gene_to_taxon: dict[str, str], default_taxon: Optional[str] = None):
+        self.gene_to_taxon = gene_to_taxon
+        self.default_taxon = default_taxon
+    
+    def resolve(self, hits: list[CandidateHit], evidence: ArticleEvidence) -> tuple[list[CandidateHit], GroupStatus]:
+        trivial_res = self.check_trivial(hits, evidence)
+        if trivial_res is not None:
+            return trivial_res
+        
+        # taxon -> {entity_id: hit}
+        hits_by_taxon = defaultdict(dict)
+        for h in hits:
+            hits_by_taxon[self.gene_to_taxon[h.entity_id]].setdefault(h.entity_id, h)
+        
+        taxa = hits_by_taxon.keys() & evidence.taxon_ids
+        if not taxa and self.default_taxon in hits_by_taxon:
+            taxa = {self.default_taxon}
+        if not taxa:
+            logger.debug("Gene group unresolved: candidate organisms %s not in article", sorted(hits_by_taxon))
+            return [], GroupStatus.AMBIGUOUS_ID
+        
+        # one hit per organism of the article, only if each organism has a single id
+        resolved = []
+        for taxon in sorted(taxa):
+            candidates = hits_by_taxon[taxon]
+            if len(candidates) > 1:
+                logger.debug("Gene group unresolved: %d ids for organism %s: %s", len(candidates), taxon, sorted(candidates))
+                return [], GroupStatus.AMBIGUOUS_ID
+            resolved.extend(candidates.values())
+        return resolved, GroupStatus.RESOLVED

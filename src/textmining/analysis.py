@@ -72,6 +72,15 @@ def overlapping_pair(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     end_b = hit_b.start_position + hit_b.hit_length
     return hit_a.start_position < end_b and hit_b.start_position < end_a
 
+def mention_span(hit: NormalizedHit) -> tuple[int, int]:
+    '''(start, end) of a hit. A miRNA hit covers only its stem ("miR"), so its normalized suffix is added
+    to cover the full name ("miR-BART1-5p") and a term matched inside the name overlaps it. The prefix is
+    left out: it may be inferred from the article and then does not occur in the text.'''
+    end = hit.start_position + hit.hit_length
+    if hit.entity_type == HitType.MIR and hit.suffix:
+        end += len(hit.suffix)
+    return hit.start_position, end
+
 def contained_pair(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     '''Check if hit_a is contained in hit_b'''
     if hit_a.sentence_id != hit_b.sentence_id:
@@ -102,7 +111,8 @@ class Grouper:
                 continue
             if not normalized_successfully(hit_a) or not normalized_successfully(hit_b):
                 continue
-            if overlapping_pair(hit_a, hit_b):
+            (start_a, end_a), (start_b, end_b) = mention_span(hit_a), mention_span(hit_b)
+            if start_a < end_b and start_b < end_a:
                 continue
             yield (hit_a, hit_b) if hit_a.entity_type == HitType.MIR else (hit_b, hit_a)
     
@@ -143,7 +153,8 @@ class EvidenceAggregator:
         
         cached = self._cache.get((term_acc, term_entity_type), None)
 
-        if cached is None and not self.propagate:
+        # types without an ontology (genes) have no ancestors to propagate to
+        if cached is None and (not self.propagate or term_entity_type not in self.type_to_ontology):
             cached = [(term_acc, 1)]
             self._cache[(term_acc, term_entity_type)] = cached
         elif cached is None:
@@ -169,4 +180,7 @@ class EvidenceAggregator:
                 assoc = Association(key,
                                     entity_types=cooc.entity_types)
                 self.associations[key] = assoc
-            assoc.record_cooccurrence_score(cooc.article_epoch, cooc.article_id, cooc_score * decay_factor)
+            is_inferred = ancestor_acc != term_acc
+            assoc.record_cooccurrence_score(cooc.article_epoch, cooc.article_id, cooc_score * decay_factor, is_inferred)
+    
+

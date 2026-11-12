@@ -1,13 +1,12 @@
 import csv
 from pathlib import Path
 from typing import Iterable, Iterator, NamedTuple, Optional
-
 import duckdb
-
+from itertools import groupby
 from textmining.article_utils import ArticleRecord
-from textmining.models import NormalizedHit, NormalizationResult, Association, CoOccurence
+from textmining.models import NormalizedHit, NormalizationResult, Association, CoOccurence, PairLabels
 from textmining.scoring import HitScore
-from textmining.enums import HitType, SynonymType, NormalizationStatus, NormalizationTargetType
+from textmining.enums import HitType, SynonymType, NormalizationStatus, NormalizationTargetType, Label
 
 NORM_FIELDNAMES = [
     "sentence_id",
@@ -97,16 +96,23 @@ def write_cooccurrences_tsv(cooccurrences: Iterable[CoOccurence], output_path: P
 
 
 def read_cooccurrences_tsv(input_path: Path) -> Iterator[CoOccurence]:
-    """Reads a .cooc file back into CoOccurence objects."""
+    """Reads a .cooc file back into CoOccurence objects.
+
+    The file is written in stream order, so the rows of an article are contiguous:
+    the epoch is counted up at every change of article."""
     with input_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
+        article_id, article_epoch = None, -1
         for row in reader:
+            if row["article_id"] != article_id:
+                article_id = row["article_id"]
+                article_epoch += 1
             yield CoOccurence(
                 article_id=row["article_id"],
                 sentence_id=row["sentence_id"],
                 section_num=row["section_num"],
                 origin_file_name=_as_str(row["origin_file_name"]),
-                article_epoch=0,
+                article_epoch=article_epoch,
                 normalized_ids=(row["normalized_id_a"], row["normalized_id_b"]),
                 entity_types=(HitType[row["entity_type_a"]], HitType[row["entity_type_b"]]),
                 entity_positions=(
@@ -114,6 +120,47 @@ def read_cooccurrences_tsv(input_path: Path) -> Iterator[CoOccurence]:
                     (_as_int(row["start_b"]), _as_int(row["end_b"])),
                 ),
                 weight=_as_int(row["weight"]),
+            )
+
+def read_aligned_cooc_labels(cooc_path: Path, label_path: Path) -> Iterator[tuple[CoOccurence, PairLabels]]:
+    labels_by_sentence = groupby(read_labels_tsv(label_path), key=lambda pair: pair.sentence_id)
+    for sentence_id, coocs in groupby(read_cooccurrences_tsv(cooc_path), key=lambda cooc: cooc.sentence_id):
+        label_sentence_id, sentence_labels = next(labels_by_sentence, (None, ()))
+        if label_sentence_id != sentence_id:
+            raise ValueError(f"Misaligned cooc/label files! Label sent_id: {label_sentence_id} does not match cooc sent_id: {sentence_id}")
+        by_key = {pair.mention_key: pair for pair in sentence_labels}
+        for cooc in coocs:
+            yield cooc, by_key[cooc.mention_key]
+
+LABEL_KEY_FIELDNAMES = ["sentence_id", "start_a", "end_a", "start_b", "end_b", "entity_type_b"]
+
+
+def write_labels_tsv(pair_labels: Iterable[PairLabels], labels: list[Label], output_path: Path) -> None:
+    """One row per mention pair: its key, then one probability column per label."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(LABEL_KEY_FIELDNAMES + [label.value for label in labels])
+        for pair in pair_labels:
+            (start_a, end_a), (start_b, end_b) = pair.entity_positions
+            # empty columns for a pair that could not be labelled
+            probabilities = ([f"{pair.probabilities[label]:.4f}" for label in labels]
+                             if pair.probabilities else [""] * len(labels))
+            writer.writerow([pair.sentence_id, start_a, end_a, start_b, end_b, pair.term_type.name, *probabilities])
+
+
+def read_labels_tsv(input_path: Path) -> Iterator[PairLabels]:
+    with input_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        label_names = reader.fieldnames[len(LABEL_KEY_FIELDNAMES):]
+        for row in reader:
+            labelled = row[label_names[0]] != ""
+            yield PairLabels(
+                sentence_id=row["sentence_id"],
+                entity_positions=((int(row["start_a"]), int(row["end_a"])), (int(row["start_b"]), int(row["end_b"]))),
+                term_type=HitType[row["entity_type_b"]],
+                probabilities={Label(name): float(row[name]) for name in label_names} if labelled else None,
             )
 
 
@@ -196,6 +243,9 @@ def write_associations_tsv(associations: Iterable[Association], output_path: Pat
         "entity_type_a",
         "entity_type_b",
         "score",
+        "evidence_mass",
+        "n_articles",
+        "n_direct_articles"
     ]
 
     with output_path.open("w", encoding="utf-8", newline="") as f:
@@ -208,17 +258,23 @@ def write_associations_tsv(associations: Iterable[Association], output_path: Pat
                 "entity_type_a": assoc.entity_types[0].name,
                 "entity_type_b": assoc.entity_types[1].name,
                 "score": f"{assoc.score:.4f}",
+                "evidence_mass": f"{assoc.evidence_mass:.4f}",
+                "n_articles": f"{assoc.n_articles}",
+                "n_direct_articles": f"{assoc.n_direct_articles}"
             })
 
 
 class ReadAssociation(NamedTuple):
     """Duck-typed stand-in for Association, not the real thing -- Association.score
     is a computed property over AssociationEvidence's private log-sum state, which
-    a single stored float can't reconstruct. load_associations only ever reads
-    .normalized_ids/.entity_types/.score, so this is a drop-in for that purpose."""
+    a single stored float can't reconstruct. load_associations only reads the stored
+    fields below, so this is a drop-in for that purpose."""
     normalized_ids: tuple[str, str]
     entity_types: tuple[HitType, HitType]
     score: float
+    evidence_mass: float
+    n_articles: int
+    n_direct_articles: int
 
 
 def read_associations_tsv(input_path: Path) -> Iterator[ReadAssociation]:
@@ -229,4 +285,7 @@ def read_associations_tsv(input_path: Path) -> Iterator[ReadAssociation]:
                 normalized_ids=(row["normalized_id_a"], row["normalized_id_b"]),
                 entity_types=(HitType[row["entity_type_a"]], HitType[row["entity_type_b"]]),
                 score=float(row["score"]),
+                evidence_mass=float(row["evidence_mass"]),
+                n_articles=int(row["n_articles"]),
+                n_direct_articles=int(row["n_direct_articles"]),
             )
