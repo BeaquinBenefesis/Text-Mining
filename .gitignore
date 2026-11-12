@@ -50,4 +50,5 @@ REVIEW.md
 CLAUDE.md
 .claude/
 # --- Database build output ---
-db/
+/db/
+/db_old/
