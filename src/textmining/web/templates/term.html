@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 {% from "_pagination.html" import pager %}
+{% from "_ranking.html" import qs, assoc_row, ic_bar, num, articles, label_cell, label_filter, label_help %}
 {% block title %}{{ entity.primary_name }} &middot; miRNA knowledgebase{% endblock %}
 {% block content %}
 <h1>{{ entity.primary_name }}</h1>
 <p class="ids"><code>{{ entity.accession }}</code>
   <span class="badge">{{ entity.entity_type|lower|replace('_',' ') }}</span>
-  <span class="badge subtle">{{ entity.source }}</span></p>
+  {% if ranked %}<span class="badge subtle">{{ entity.source }}</span>
+  <span class="badge subtle">specificity {{ ic_bar(entity.ic) }}</span>
+  {% elif entity.organism %}<span class="badge subtle">{{ entity.organism }}</span>{% endif %}</p>
 
 <form class="filters" method="get">
+  {% if label %}<input type="hidden" name="label" value="{{ label }}">{% endif %}
   <label>Organism
     <select name="organism" onchange="this.form.submit()">
       <option value="" {{ 'selected' if not organism }}>all</option>
@@ -17,37 +21,35 @@
       {% endfor %}
     </select>
   </label>
-  <label class="check">
-    <input type="checkbox" name="expand" value="true" {{ 'checked' if expand }} onchange="this.form.submit()">
-    include ontology descendants
-  </label>
 </form>
-
-{% if expand %}
-<div class="notice subtle">
-  Showing miRNAs associated with <strong>{{ entity.primary_name }}</strong> or any of its ontology
-  descendants. This is <em>query expansion</em> at retrieval time, not propagated scoring: each
-  miRNA is ranked by its single best matching association (<code>MAX</code>), never by summing
-  scores across subtypes, which would systematically favour broad terms.
-</div>
-{% endif %}
+{{ label_filter(labels, label, {'organism': organism or ''}) }}
 
 {% if results['items'] %}
 <table class="rows">
-  <thead><tr><th>miRNA</th><th>Level</th><th class="num">Best score</th><th>Matched via</th></tr></thead>
+  <thead><tr>
+    <th>miRNA</th><th>Level</th><th>Relation</th>
+    <th class="num sorted">Evidence</th><th class="num">Articles</th>
+  </tr></thead>
   <tbody>
   {% for r in results['items'] %}
-    <tr>
+    {{ assoc_row(r.id) }}
       <td><a href="/mirna/{{ r.mirna_accession }}">{{ r.mirna_name }}</a></td>
       <td>{{ r.reference_level }}</td>
-      <td class="num"><a href="/association/{{ r.id }}">{{ '%.2f'|format(r.score) }}</a></td>
-      <td class="via">{{ r.via_terms }}{% if r.n_terms > 4 %} <span class="muted">+{{ r.n_terms - 4 }} more</span>{% endif %}</td>
+      <td class="nowrap">{{ label_cell(r) }}</td>
+      <td class="num">{{ num(r.score) }}</td>
+      <td class="num">{{ articles(r) }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
-{{ pager(results, '?organism=' ~ (organism or '') ~ '&expand=' ~ ('true' if expand else 'false') ~ '&') }}
+{{ pager(results, qs({'organism': organism or '', 'label': label})) }}
+<p class="muted small">
+  <strong>Evidence</strong> is the amount of literature support{% if ranked %}, including evidence on
+  ontology subtypes of {{ entity.primary_name }}. Every row shares this term's specificity, so the list
+  is ordered by evidence alone{% endif %}.
+</p>
+{{ label_help(label) }}
 {% else %}
-<p class="empty">No miRNAs associated with this term{{ ' for this organism' if organism }}.</p>
+<p class="empty">No miRNAs associated with this {{ 'term' if ranked else entity.entity_type|lower }}{{ ' for this organism' if organism }}{{ ' with this relation' if label }}.</p>
 {% endif %}
 {% endblock %}

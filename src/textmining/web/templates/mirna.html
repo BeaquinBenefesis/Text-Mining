@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% from "_pagination.html" import pager %}
 {% from "_timeline.html" import timeline %}
+{% from "_ranking.html" import qs, sort_toggle, assoc_row, ic_bar, num, articles, help, label_cell, label_filter, label_help %}
+{% from "_cloud.html" import clouds as term_clouds %}
 {% block title %}{{ entity.primary_name }} &middot; miRNA knowledgebase{% endblock %}
 {% block content %}
 <h1>{{ entity.primary_name }}</h1>
@@ -20,14 +22,18 @@
 {% endif %}
 
 <section class="score">
-  <div class="stat"><span class="value">{{ '%.2f'|format(score.score) }}</span><span class="label">research score</span></div>
-  <div class="stat"><span class="value">{{ '{:,}'.format(score.n_articles) }}</span><span class="label">articles mentioning</span></div>
-  <div class="stat"><span class="value">{{ '{:,}'.format(score.breadth) }}</span><span class="label">associated terms</span></div>
+  <div class="stat"><span class="value">{{ '{:,}'.format(stats.n_articles) }}</span><span class="label">articles mentioning</span></div>
+  <div class="stat"><span class="value">{{ '{:,}'.format(stats.breadth) }}</span><span class="label">associated terms</span></div>
+  {% if stats.rank %}
+  <div class="stat"><span class="value">#{{ '{:,}'.format(stats.rank) }}</span>
+    <span class="label">of {{ '{:,}'.format(stats.population) }}
+      {{ entity.organism ~ ' ' if entity.organism }}{{ level_plurals[entity.reference_level] }}
+      {%- if stats.population >= 100 %} &middot; top {{ '%.1f'|format([stats.top_share * 100, 0.1]|max) }}%{% endif %}</span></div>
+  {% endif %}
   <p class="muted">
-    Research <em>attention</em>, not how well characterised this miRNA is: a popularity index,
-    topped by miR-21, miR-155 and let-7. Volume is summed as share of corpus per year rather than
-    raw article count, so it is not inflated by the corpus&rsquo;s bias toward recent years.
-    Component weights are provisional and still need validating against HMDD.
+    The rank compares the number of articles mentioning this miRNA with every miRNA of the same
+    level and organism that is mentioned at least once in the corpus. Ranks are not comparable
+    across levels: a precursor also counts the articles that name no arm.
   </p>
 </section>
 
@@ -35,32 +41,55 @@
 {{ timeline('mir-timeline', '/api/mirna/' ~ entity.accession ~ '/timeline', entity.primary_name,
             '/mirna/' ~ entity.accession ~ '/year/') }}
 
+{% if clouds %}
+<details class="fold">
+<summary><h2>Association profile</h2></summary>
+{{ term_clouds(clouds) }}
+<p class="muted small">
+  The strongest specific terms per type, each linking to its evidence. Size reflects strength within a
+  panel only; types are not comparable with each other. A broader term is left out when one of its
+  subtypes is shown, so a panel is not simply the first rows of the table below.
+</p>
+</details>
+{% endif %}
+
 <h2>Associations</h2>
 <nav class="filters">
-  <a href="?{% if selected_type %}{% endif %}" class="{{ 'on' if not selected_type }}">All
-    ({{ '{:,}'.format(counts.values()|sum) }})</a>
   {% for t in term_types %}{% if counts.get(t) %}
-    <a href="?type={{ t }}" class="{{ 'on' if selected_type == t }}">
+    <a href="{{ qs({'type': t, 'sort': sort}) }}" class="{{ 'on' if selected_type == t }}">
       {{ t|lower|replace('_',' ') }} ({{ '{:,}'.format(counts[t]) }})</a>
   {% endif %}{% endfor %}
 </nav>
+{% if ranked %}{{ sort_toggle(sort, {'type': selected_type, 'label': label}) }}{% endif %}
+{{ label_filter(labels, label, {'type': selected_type, 'sort': sort}) }}
 
 {% if associations['items'] %}
 <table class="rows">
-  <thead><tr><th>Term</th><th>Type</th><th class="num">Score</th></tr></thead>
+  <thead><tr>
+    <th>{{ 'Term' if ranked else selected_type|capitalize }}</th><th>Relation</th>
+    {% if ranked %}<th class="num{{ ' sorted' if sort == 'relevance' }}">Relevance</th>
+    {% else %}<th>Organism</th>{% endif %}
+    <th class="num{{ ' sorted' if sort == 'evidence' }}">Evidence</th>
+    <th class="num">Articles</th>{% if ranked %}<th>Specificity</th>{% endif %}
+  </tr></thead>
   <tbody>
   {% for a in associations['items'] %}
-    <tr>
-      <td><a href="/association/{{ a.id }}">{{ a.term_name }}</a>
-          <code class="muted">{{ a.term_accession }}</code></td>
-      <td>{{ a.term_type|lower|replace('_',' ') }}</td>
-      <td class="num">{{ '%.2f'|format(a.score) }}</td>
+    {{ assoc_row(a.id) }}
+      <td>{{ a.term_name }}</td>
+      <td class="nowrap">{{ label_cell(a) }}</td>
+      {% if ranked %}<td class="num">{{ num(a.relevance) }}</td>
+      {% else %}<td>{{ a.term_organism or '' }}</td>{% endif %}
+      <td class="num">{{ num(a.score) }}</td>
+      <td class="num">{{ articles(a) }}</td>
+      {% if ranked %}<td>{{ ic_bar(a.ic) }}</td>{% endif %}
     </tr>
   {% endfor %}
   </tbody>
 </table>
-{{ pager(associations, '?' ~ ('type=' ~ selected_type ~ '&' if selected_type else '')) }}
+{{ pager(associations, qs({'type': selected_type, 'sort': sort, 'label': label})) }}
+{{ help(ranked) }}
+{{ label_help(label) }}
 {% else %}
-<p class="empty">No associations{{ ' of this type' if selected_type }} for this miRNA.</p>
+<p class="empty">No {{ selected_type|lower|replace('_',' ') ~ ' ' if counts }}associations for this miRNA{{ ' with this relation' if label }}.</p>
 {% endif %}
 {% endblock %}

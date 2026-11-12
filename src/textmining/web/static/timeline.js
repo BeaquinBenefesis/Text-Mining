@@ -1,8 +1,10 @@
 // Renders every <canvas data-src> as a dual-axis timeline: raw article counts as
 // bars, share of that year's corpus as a line. The line is the series to read --
-// the corpus is 99% post-2010, so raw counts largely describe corpus coverage.
+// the corpus is 98% post-2010, so raw counts largely describe corpus coverage.
+// A canvas with data-bars-only draws the raw counts alone (the corpus itself).
 (function () {
-  const COLOURS = { raw: "#c8d4e3", share: "#2f6f9f", context: "#d9b8a8" };
+  const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const charts = new Map();
 
   async function fetchPoints(url) {
     const response = await fetch(url);
@@ -19,13 +21,18 @@
       return;
     }
 
+    const barsOnly = "barsOnly" in canvas.dataset;
+    const COLOURS = { raw: css("--chart-raw"), share: css("--chart-share"), context: css("--chart-context") };
+    Chart.defaults.color = css("--muted");
+    Chart.defaults.borderColor = css("--line");
     const datasets = [
-      { type: "bar", label: "articles (raw)", data: points.map(p => p.n_articles),
+      { type: "bar", label: barsOnly ? "articles" : "articles (raw)", data: points.map(p => p.n_articles),
         backgroundColor: COLOURS.raw, yAxisID: "y", order: 2 },
+    ];
+    if (!barsOnly) datasets.push(
       { type: "line", label: "share of corpus", data: points.map(p => p.share),
         borderColor: COLOURS.share, backgroundColor: COLOURS.share,
-        yAxisID: "yShare", tension: 0.25, pointRadius: 2, order: 1 },
-    ];
+        yAxisID: "yShare", tension: 0.25, pointRadius: 2, order: 1 });
 
     // On an association page, overlay the miRNA's overall attention curve so the
     // association can be read against it rather than in isolation.
@@ -46,12 +53,14 @@
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         scales: {
+          ...(barsOnly ? { x: { ticks: { maxRotation: 0, autoSkipPadding: 12 } } } : {}),
           y: { position: "left", title: { display: true, text: "articles" }, beginAtZero: true },
-          yShare: { position: "right", title: { display: true, text: "share of corpus" },
+          ...(barsOnly ? {} : { yShare: { position: "right", title: { display: true, text: "share of corpus" },
                     beginAtZero: true, grid: { drawOnChartArea: false },
-                    ticks: { callback: v => (v * 100).toFixed(2) + "%" } },
+                    ticks: { callback: v => (v * 100).toFixed(2) + "%" } } }),
         },
         plugins: {
+          legend: { display: !barsOnly },
           tooltip: { callbacks: { label: item => item.dataset.yAxisID === "yShare"
               ? `${item.dataset.label}: ${(item.parsed.y * 100).toFixed(3)}%`
               : `${item.dataset.label}: ${item.parsed.y.toLocaleString()}` } },
@@ -64,8 +73,15 @@
       },
     });
     if (canvas.dataset.link) canvas.style.cursor = "pointer";
+    charts.set(canvas, chart);
     return chart;
   }
 
   document.querySelectorAll("canvas[data-src]").forEach(draw);
+  document.addEventListener("themechange", () => {
+    for (const [canvas, chart] of charts) {
+      chart.destroy();
+      draw(canvas);
+    }
+  });
 })();

@@ -1,0 +1,16 @@
+{# One tag cloud per term type. Font size is scaled within a panel only. #}
+{% macro clouds(panels) %}
+<div class="clouds">
+  {% for panel in panels %}
+  <section class="cloud">
+    <h3><a href="?type={{ panel.term_type }}">{{ panel.term_type|lower|replace('_',' ') }}</a></h3>
+    <p>
+      {% for t in panel.terms %}
+      <a href="/association/{{ t.id }}" style="font-size: {{ '%.2f'|format(0.85 + 0.95 * t.weight) }}em"
+         title="evidence {{ '%.2f'|format(t.score) }}, {{ '{:,}'.format(t.n_articles) }} article{{ '' if t.n_articles == 1 else 's' }}">{{ t.term_name }}</a>
+      {% endfor %}
+    </p>
+  </section>
+  {% endfor %}
+</div>
+{% endmacro %}

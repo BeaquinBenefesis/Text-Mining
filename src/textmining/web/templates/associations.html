@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% from "_pagination.html" import pager %}
+{% from "_ranking.html" import qs, sort_toggle, assoc_row, ic_bar, num, articles, help, label_cell, label_filter, label_help %}
+{% block title %}Top associations &middot; miRNA knowledgebase{% endblock %}
+{% block content %}
+<h1>Top associations</h1>
+
+<form class="filters" method="get">
+  <input type="hidden" name="sort" value="{{ sort }}">
+  {% if label %}<input type="hidden" name="label" value="{{ label }}">{% endif %}
+  <label>Type
+    <select name="type" onchange="this.form.submit()">
+      {% for t in term_types %}
+        <option value="{{ t }}" {{ 'selected' if selected_type == t }}>{{ t|lower|replace('_',' ') }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Organism
+    <select name="organism" onchange="this.form.submit()">
+      <option value="" {{ 'selected' if not organism }}>all</option>
+      {% for o in organisms %}
+        <option value="{{ o.organism }}" {{ 'selected' if organism == o.organism }}>{{ o.organism }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Level
+    <select name="level" onchange="this.form.submit()">
+      <option value="" {{ 'selected' if not level }}>all</option>
+      {% for l in levels %}
+        <option value="{{ l }}" {{ 'selected' if level == l }}>{{ l }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+{% set params = {'type': selected_type, 'organism': organism, 'level': level} %}
+{% if ranked %}{{ sort_toggle(sort, dict(params, label=label)) }}{% endif %}
+{{ label_filter(labels, label, dict(params, sort=sort)) }}
+{% if organism and level == 'family' %}
+<p class="notice subtle">miRNA families carry no organism; choose organism &ldquo;all&rdquo; to list them.</p>
+{% endif %}
+
+{% if results['items'] %}
+<table class="rows">
+  <thead><tr>
+    <th>miRNA</th><th>{{ 'Term' if ranked else selected_type|capitalize }}</th><th>Relation</th>
+    {% if ranked %}<th class="num{{ ' sorted' if sort == 'relevance' }}">Relevance</th>
+    {% else %}<th>Organism</th>{% endif %}
+    <th class="num{{ ' sorted' if sort == 'evidence' }}">Evidence</th>
+    <th class="num">Articles</th>{% if ranked %}<th>Specificity</th>{% endif %}
+  </tr></thead>
+  <tbody>
+  {% for a in results['items'] %}
+    {{ assoc_row(a.id) }}
+      <td class="nowrap"><a href="/mirna/{{ a.mirna_accession }}">{{ a.mirna_name }}</a>
+          {% if not level %}<span class="muted small">{{ a.reference_level }}</span>{% endif %}</td>
+      <td>{{ a.term_name }}</td>
+      <td class="nowrap">{{ label_cell(a) }}</td>
+      {% if ranked %}<td class="num">{{ num(a.relevance) }}</td>
+      {% else %}<td>{{ a.term_organism or '' }}</td>{% endif %}
+      <td class="num">{{ num(a.score) }}</td>
+      <td class="num">{{ articles(a) }}</td>
+      {% if ranked %}<td>{{ ic_bar(a.ic) }}</td>{% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{{ pager(results, qs(dict(params, sort=sort, label=label))) }}
+{{ help(ranked) }}
+{{ label_help(label) }}
+{% else %}
+<p class="empty">No associations match these filters.</p>
+{% endif %}
+{% endblock %}

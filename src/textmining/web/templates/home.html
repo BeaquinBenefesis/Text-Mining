@@ -1,12 +1,51 @@
 {% extends "base.html" %}
+{# the landing page has its own, larger search box #}
+{% block header_search %}{% if results is not none %}{{ super() }}{% endif %}{% endblock %}
 {% block content %}
 {% if results is none %}
   <section class="hero">
     <h1>Search the knowledgebase</h1>
     <p>Look up a miRNA to see how much it has been studied and what it is associated with,
-       or look up a disease, tissue, cell type, pathway or biological process to see which
-       miRNAs are associated with it &mdash; including through its ontology descendants.</p>
+       or look up a disease, tissue, cell type, pathway, biological process or gene to see which
+       miRNAs are associated with it &mdash; for ontology terms, evidence on their subtypes counts too.</p>
     <p class="muted">Names, synonyms, legacy miRBase names and accessions are all searchable.</p>
+    <form class="search big" action="/search" method="get">
+      <input type="search" name="q" placeholder="miRNA, disease, gene, tissue, pathway, accession&hellip;"
+             aria-label="Search the knowledgebase" autocomplete="off">
+      <button type="submit">Search</button>
+      <a class="button-secondary" href="/associations">Top associations</a>
+    </form>
+    <p class="examples"><span class="muted">Try</span>
+      <a href="/search?q=miR-21">miR-21</a> <a href="/search?q=breast%20cancer">breast cancer</a> <a href="/search?q=PTEN">PTEN</a></p>
+  </section>
+
+  <section class="headline" aria-label="Database contents">
+    <div class="stat"><span class="value" id="stat-mirnas">&ndash;</span><span class="label">miRNAs with associations</span></div>
+    <div class="stat"><span class="value" id="stat-terms">&ndash;</span><span class="label">terms with associations</span></div>
+    <div class="stat"><span class="value" id="stat-associations">&ndash;</span><span class="label">associations</span></div>
+    <div class="stat"><span class="value" id="stat-articles">&ndash;</span><span class="label">articles</span></div>
+  </section>
+
+  <section class="landing-charts">
+    <div class="panel">
+      <h2>Associations per entity type</h2>
+      <p class="legend"><span><i class="direct"></i>Direct</span> <span><i class="propagated"></i>Propagated</span></p>
+      <ul class="stat-bars" id="type-bars"></ul>
+    </div>
+    <div class="panel">
+      <h2>Main relation</h2>
+      <p class="muted small">Associations by their most common relation. The other <span id="no-relation">&ndash;</span>
+        have no relation stated in a direct sentence.</p>
+      <ul class="stat-bars" id="label-bars"></ul>
+    </div>
+  </section>
+
+  <section class="panel landing-years">
+    <h2>Articles per year</h2>
+    <p class="muted small">2000 onwards. Not shown: <span id="early-articles">&ndash;</span> earlier articles and
+      <span id="undated-articles">&ndash;</span> without a date. Recent years may be incomplete.</p>
+    <figure class="timeline"><canvas id="corpus-timeline" height="110" data-src="/api/corpus/timeline"
+            data-label="Articles" data-bars-only="true"></canvas></figure>
   </section>
 {% elif not results %}
   <p class="empty">Nothing matched &ldquo;{{ query }}&rdquo;.</p>
@@ -20,7 +59,7 @@
         <span class="badge warn">ambiguous identifier</span>
         <p class="muted">Carried by more than one miRBase accession &mdash; not resolved.</p>
       {% else %}
-        <a class="name" href="{{ '/mirna/' if r.entity_type == 'MIR' else '/term/' }}{{ r.accession }}">
+        <a class="name" href="{{ '/mirna/' if r.entity_type == 'MIR' else '/term/' }}{{ r.accession|urlencode }}">
           {{ r.primary_name }}</a>
         <span class="badge">{{ r.entity_type|lower|replace('_',' ') }}</span>
         {% if r.reference_level %}<span class="badge subtle">{{ r.reference_level }}</span>{% endif %}
@@ -35,3 +74,4 @@
   </ul>
 {% endif %}
 {% endblock %}
+{% block scripts %}{% if results is none %}<script src="/static/landing.js?v={{ v }}"></script>{% endif %}{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Downloads &middot; miRNA knowledgebase{% endblock %}
+{% block content %}
+<h1>Downloads</h1>
+{% if files %}
+<table class="rows">
+  <tr><th>File</th><th class="num">Size</th></tr>
+  {% for name, size in files %}
+  <tr><td><a href="/downloads/{{ name }}">{{ name }}</a></td>
+      <td class="num">{{ '%.1f MB'|format(size / 1e6) if size < 1e9 else '%.2f GB'|format(size / 1e9) }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No download files in this build.</p>
+{% endif %}
+{% endblock %}

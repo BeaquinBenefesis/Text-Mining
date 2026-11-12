@@ -1,18 +1,73 @@
 """Read-only queries backing the UI. One function per panel; each takes an open
 connection and returns plain dicts.
 
-No ORM, matching the raw-SQL decision in DATABASE_DESIGN_NOTES.txt section 8.1.
+No ORM, matching the raw-SQL decision in notes/DATABASE_DESIGN_NOTES.txt section 8.1.
 """
+import json
 import sqlite3
 from dataclasses import dataclass
-from math import log2
 
 from textmining.web.highlight import extend_mirna_span, render
 
 PER_PAGE = 25
 EVIDENCE_PER_PAGE = 20
+CORPUS_TIMELINE_START = 2000  # earlier years hold almost no articles
 
-TERM_TYPES = ("DISEASE", "BIOLOGICAL_PROCESS", "CELL", "PATHWAY", "TISSUE")
+TERM_TYPES = ("DISEASE", "BIOLOGICAL_PROCESS", "CELL", "PATHWAY", "TISSUE", "GENE")
+# Lists show one term type at a time: relevance is not comparable across ontologies.
+DEFAULT_TYPE = "DISEASE"
+# Types without an ontology have no IC, hence no relevance: ordered by evidence only.
+UNRANKED_TYPES = ("GENE",)
+TYPE_PLURALS = {"DISEASE": "diseases", "BIOLOGICAL_PROCESS": "biological processes", "CELL": "cell types",
+                "PATHWAY": "pathways", "TISSUE": "tissues", "GENE": "genes"}
+LEVEL_PLURALS = {"mature": "mature miRNAs", "precursor": "precursors", "family": "families"}
+LEVELS = ("mature", "precursor", "family")
+
+# Ranking (notes/WEIGHTED_RANKING_PLAN.md). "relevance" orders by E * ic^alpha: the evidence
+# mass before the outer log, discounted by normalised structural IC, so halving a
+# term's IC costs 2^alpha times the evidence. alpha = 2 is provisional. "evidence"
+# is the plain score. Only these fixed expressions reach SQL; the alpha constant is
+# inlined, never user input.
+RELEVANCE_ALPHA = 2
+SORTS = ("relevance", "evidence")
+
+# Relation labels (notes/RELATION_LABELS_PLAN.md), in display order: opposite pairs are adjacent.
+# 'none' is not listed: it is never an association's dominant label.
+LABELS = ("promotes", "inhibits", "expression_up", "expression_down", "targets",
+          "expressed", "biomarker", "associated")
+# The model's probability orders sentences reliably but is overconfident, so it is shown
+# as a level. Cut-offs from the coverage table in analysis/training.ipynb.
+CONFIDENCE_LEVELS = ((0.983, "high"), (0.85, "medium"))
+EVIDENCE_SORTS = ("article", "confidence")
+
+
+def confidence_level(confidence: float) -> str:
+    return next((level for cutoff, level in CONFIDENCE_LEVELS if confidence >= cutoff), "low")
+
+
+def _rank_key(sort: str, a: str = "a", e: str = "e") -> str:
+    assert sort in SORTS, sort
+    if sort == "relevance":
+        return f"{a}.evidence_mass * pow({e}.ic, {RELEVANCE_ALPHA})"
+    return f"{a}.score"
+
+
+def _relevance(a: str = "a", e: str = "e") -> str:
+    """Displayed relevance, log2(1 + ic^alpha * E): the same units as score, and
+    never above it. NULL for terms without IC (stale ids on a dev database)."""
+    return f"log2(1 + {a}.evidence_mass * pow({e}.ic, {RELEVANCE_ALPHA}))"
+
+
+def _assoc_columns(a: str = "a", e: str = "e") -> str:
+    return f"""{a}.id, {a}.score, {a}.term_type, {a}.evidence_mass,
+               {a}.n_articles, {a}.n_direct_articles, {e}.ic,
+               {a}.dominant_label, {a}.dominant_label_articles,
+               {_relevance(a, e)} AS relevance"""
+
+
+def _label_filter(label: str | None, a: str = "a") -> str:
+    """Keeps the associations whose dominant label is :label. The same in every list."""
+    return f" AND {a}.dominant_label = :label" if label else ""
 
 
 def _rows(con, sql, params=()):
@@ -63,7 +118,7 @@ def search(con: sqlite3.Connection, query: str, limit: int = 30) -> list[dict]:
 def get_entity(con: sqlite3.Connection, accession: str) -> dict | None:
     return _one(con, """
         SELECT id, accession, primary_name, entity_type, source, obsolete,
-               reference_level, organism
+               reference_level, organism, ic
         FROM entity WHERE accession = ?
     """, (accession,))
 
@@ -73,7 +128,7 @@ def get_entity(con: sqlite3.Connection, accession: str) -> dict | None:
 def _normalise(rows: list[dict]) -> list[dict]:
     """Attach share-of-corpus alongside the raw count.
 
-    The corpus is 99% post-2010 and 46% post-2020, so a raw per-year count is
+    The corpus is 98% post-2010 and 54% post-2020, so a raw per-year count is
     dominated by corpus composition; every miRNA shows the same rising shape.
     Dividing by that year's article total is what makes the series comparable
     across years.
@@ -102,7 +157,9 @@ def mirna_timeline(con: sqlite3.Connection, mir_key: str) -> list[dict]:
     """, (mir_key,)))
 
 
-def association_timeline(con: sqlite3.Connection, association_id: int) -> list[dict]:
+def association_timeline(con: sqlite3.Connection, association_ids: list[int]) -> list[dict]:
+    """Articles per year with evidence for any of these associations: an association and
+    those of its subterms (association_subterms). Counted once however many of them an article names."""
     return _normalise(_rows(con, """
         SELECT a.year, count(DISTINCT s.article_id) AS n_articles,
                cy.n_articles AS corpus_articles
@@ -110,50 +167,90 @@ def association_timeline(con: sqlite3.Connection, association_id: int) -> list[d
         JOIN sentence s     ON s.id = ae.sentence_id
         JOIN article a      ON a.id = s.article_id
         JOIN corpus_year cy ON cy.year = a.year
-        WHERE ae.association_id = ?
+        WHERE ae.association_id IN (SELECT value FROM json_each(?))
         GROUP BY a.year ORDER BY a.year
-    """, (association_id,)))
+    """, (json.dumps(association_ids),)))
 
 
-# ---------------------------------------------------------------- research score
+# ---------------------------------------------------------------- miRNA stats
 
 @dataclass
-class ResearchScore:
-    score: float
-    weighted_volume: float
-    breadth: int
+class MirnaStats:
     n_articles: int
+    breadth: int
+    # position by n_articles among the mentioned miRNAs of the same reference level
+    # and organism; None for a miRNA that is never mentioned
+    rank: int | None = None
+    population: int | None = None
+
+    @property
+    def top_share(self) -> float | None:
+        """Share of the population ranked at or above this miRNA, in (0, 1]."""
+        return self.rank / self.population if self.rank else None
 
 
-# Both terms are log-compressed, matching the saturation AssociationEvidence
-# already applies per article (models.py). w1/w2 are NOT settled -- they need
-# validating against an external measure of study depth (HMDD entry count per
-# miRNA is the natural choice and is already the planned benchmark).
-SCORE_W_VOLUME = 1.0
-SCORE_W_BREADTH = 1.0
+def mirna_stats(con: sqlite3.Connection, entity_id: int, mir_key: str) -> MirnaStats:
+    """Articles mentioning a miRNA, its number of associated terms and its rank.
 
-
-def research_score(con: sqlite3.Connection, entity_id: int, mir_key: str) -> ResearchScore:
-    """How much attention a miRNA has received.
-
-    Volume runs on share-of-corpus rather than raw article counts, so a miRNA is
-    not rewarded merely for having been studied in the years the corpus covers
-    best. A recency term is deliberately absent for the same reason: the corpus
-    is already recency-biased, and adding one would double-count that artefact.
-
-    This measures attention, not how well characterised a miRNA is; it will be
-    topped by miR-21, miR-155 and let-7.
+    Ranks are comparable only within a reference level: a precursor also collects
+    the articles that name no arm, so it outranks its own mature forms.
     """
-    timeline = mirna_timeline(con, mir_key)
-    weighted_volume = sum(row["share"] for row in timeline)
-    n_articles = sum(row["n_articles"] for row in timeline)
+    n_articles = con.execute(
+        "SELECT count(*) FROM mir_mention_article WHERE mir_key = ?", (mir_key,)
+    ).fetchone()[0]
     breadth = con.execute(
         "SELECT count(DISTINCT term_entity_id) FROM association WHERE mirna_entity_id = ?",
         (entity_id,),
     ).fetchone()[0]
-    score = (SCORE_W_VOLUME * log2(1 + weighted_volume)
-             + SCORE_W_BREADTH * log2(1 + breadth))
-    return ResearchScore(score, weighted_volume, breadth, n_articles)
+    try:
+        rank, population = con.execute(
+            "SELECT pop_rank, pop_size FROM mirna_stats WHERE entity_id = ?", (entity_id,)
+        ).fetchone() or (None, None)
+    except sqlite3.OperationalError:   # database built before mirna_stats existed
+        rank = population = None
+    return MirnaStats(n_articles, breadth, rank, population)
+
+
+# ---------------------------------------------------------------- term clouds
+
+def mirna_term_clouds(con, entity_id: int, per_type: int = 15, candidates: int = 60) -> list[dict]:
+    """The most specific top terms of a miRNA, one panel per term type.
+
+    Evidence is propagated to ontology ancestors, so the plain top rows of a type
+    are chains ('breast cancer', 'thoracic cancer', 'cancer'). A candidate is
+    dropped when one of its descendants is also a candidate, which leaves the
+    most specific term of each chain.
+
+    `weight` in [0, 1] is scaled within the panel: relevance is not comparable
+    across ontologies, and genes have evidence only.
+    """
+    panels = []
+    for term_type in TERM_TYPES:
+        ranked = term_type not in UNRANKED_TYPES
+        value = _relevance() if ranked else "a.score"
+        terms = _rows(con, f"""
+            SELECT a.id, a.term_entity_id, e.primary_name AS term_name, a.score, a.n_articles,
+                   {value} AS value
+            FROM association a JOIN entity e ON e.id = a.term_entity_id
+            WHERE a.mirna_entity_id = ? AND a.term_type = ? AND {value} > 0
+            ORDER BY value DESC, a.id LIMIT ?
+        """, (entity_id, term_type, candidates))
+        if not terms:
+            continue
+        if ranked:
+            ids = [t["term_entity_id"] for t in terms]
+            marks = ",".join("?" * len(ids))
+            broader = {row[0] for row in con.execute(f"""
+                SELECT DISTINCT ancestor_id FROM ontology_closure
+                WHERE ancestor_id IN ({marks}) AND descendant_id IN ({marks})
+            """, ids + ids)}
+            terms = [t for t in terms if t["term_entity_id"] not in broader]
+        terms = terms[:per_type]
+        low, high = terms[-1]["value"], terms[0]["value"]
+        for t in terms:
+            t["weight"] = (t["value"] - low) / (high - low) if high > low else 1.0
+        panels.append({"term_type": term_type, "terms": terms})
+    return panels
 
 
 # ---------------------------------------------------------------- associations
@@ -168,129 +265,127 @@ def mirna_association_counts(con: sqlite3.Connection, entity_id: int) -> dict[st
     }
 
 
-def mirna_associations(con, entity_id: int, term_type: str | None = None,
-                       page: int = 1, per_page: int = PER_PAGE) -> dict:
-    where = "a.mirna_entity_id = :eid"
-    params = {"eid": entity_id, "lim": per_page, "off": (page - 1) * per_page}
-    if term_type:
-        where += " AND a.term_type = :tt"
-        params["tt"] = term_type
-    total = con.execute(
-        f"SELECT count(*) FROM association a WHERE {where}",
-        {k: v for k, v in params.items() if k in ("eid", "tt")},
-    ).fetchone()[0]
+def mirna_associations(con, entity_id: int, term_type: str,
+                       page: int = 1, per_page: int = PER_PAGE,
+                       sort: str = "relevance", label: str | None = None) -> dict:
+    where = "a.mirna_entity_id = :eid AND a.term_type = :tt" + _label_filter(label)
+    params = {"eid": entity_id, "tt": term_type, "label": label,
+              "lim": per_page, "off": (page - 1) * per_page}
+    total = con.execute(f"SELECT count(*) FROM association a WHERE {where}", params).fetchone()[0]
+    # Relevance order needs a temp sort after the ix_assoc_mir_score range scan:
+    # ~6 ms for the largest miRNA (notes/WEIGHTED_RANKING_PLAN.md section 8).
     items = _rows(con, f"""
-        SELECT a.id, a.score, a.term_type,
-               e.accession AS term_accession, e.primary_name AS term_name
+        SELECT {_assoc_columns()},
+               e.accession AS term_accession, e.primary_name AS term_name,
+               e.organism AS term_organism
         FROM association a
         JOIN entity e ON e.id = a.term_entity_id
         WHERE {where}
-        ORDER BY a.score DESC LIMIT :lim OFFSET :off
+        ORDER BY {_rank_key(sort)} DESC, a.score DESC, a.id LIMIT :lim OFFSET :off
     """, params)
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
-def term_mirnas(con, term_entity_id: int, expand: bool = True,
-                organism: str | None = "hsa", page: int = 1,
-                per_page: int = PER_PAGE) -> dict:
-    """miRNAs associated with a term, optionally including its ontology descendants.
+# The database is opened immutable, so a global listing cannot change while the
+# process runs. Keyed by every argument; bounded so that paging through many
+# filter combinations cannot grow it without limit.
+_TOP_CACHE: dict[tuple, dict] = {}
+_TOP_CACHE_MAX = 256
 
-    Scores are aggregated with MAX, never summed. Association scores are already
-    log-compressed per term, so adding a miRNA's carcinoma-subtype scores together
-    would inflate broad terms in proportion to how many subtypes happen to
-    co-occur -- the failure mode set out in design notes section 5.2. This is
-    query expansion (section 5.1a), not the precomputed evidence propagation of
-    5.1b, which does not exist yet.
 
-    ontology_closure holds strict ancestry only -- `ancestors()` excludes self --
-    so the term itself must be unioned in or its own associations disappear.
+def top_associations(con, sort: str = "relevance", term_type: str = DEFAULT_TYPE,
+                     organism: str | None = "hsa", level: str | None = "mature",
+                     page: int = 1, per_page: int = PER_PAGE, label: str | None = None) -> dict:
+    """All associations of one term type under one ordering, as a browsable list of examples.
 
-    Two passes rather than one: the per-miRNA term counts and names are gathered
-    for the page's 25 miRNAs only. Computing them as correlated subqueries over
-    the expanded set instead cost ~2s on the MONDO root, which expands to every
-    disease in the ontology.
+    Deliberately not deduplicated: heavily studied miRNAs (miR-21, miR-155) repeat,
+    and precursor and mature rows of one miRNA both appear when no level is chosen.
+    Families carry no organism, so an organism filter excludes them.
+
+    No index serves a global order by a computed key, so an uncached page is a
+    scan with a top-N sort over every matching association.
     """
-    targets = "SELECT :tid AS id" + (
-        " UNION SELECT descendant_id FROM ontology_closure WHERE ancestor_id = :tid"
-        if expand else ""
-    )
-    org_filter = "AND m.organism = :org" if organism else ""
-    params = {"tid": term_entity_id, "org": organism,
-              "lim": per_page, "off": (page - 1) * per_page}
+    key = (sort, term_type, organism, level, label, page, per_page)
+    if key in _TOP_CACHE:
+        return _TOP_CACHE[key]
 
-    # MATERIALIZED so the expansion is evaluated once, not per reference.
-    base = f"""
-        WITH targets(id) AS MATERIALIZED ({targets}),
-        hits AS MATERIALIZED (
-            SELECT a.id, a.score, a.mirna_entity_id
-            FROM association a
-            JOIN targets t ON t.id = a.term_entity_id
-            JOIN entity  m ON m.id = a.mirna_entity_id
-            WHERE 1=1 {org_filter}
-        )
-    """
-    total = con.execute(
-        base + "SELECT count(DISTINCT mirna_entity_id) FROM hits", params
-    ).fetchone()[0]
+    where = ["a.term_type = :tt" + _label_filter(label)]
+    params = {"tt": term_type, "label": label, "lim": per_page, "off": (page - 1) * per_page}
+    if organism:
+        where.append("m.organism = :org"); params["org"] = organism
+    if level:
+        where.append("m.reference_level = :lvl"); params["lvl"] = level
+    where_sql = " AND ".join(where)
 
-    items = _rows(con, base + """
-        , ranked AS (
-            SELECT h.id, h.score, h.mirna_entity_id,
-                   row_number() OVER (
-                       PARTITION BY h.mirna_entity_id ORDER BY h.score DESC, h.id
-                   ) AS rn
-            FROM hits h
-        )
-        SELECT r.id, r.score,
+    total_key = (sort, term_type, organism, level, label, "total")
+    total = _TOP_CACHE.get(total_key)
+    if total is None:
+        total = con.execute(f"""
+            SELECT count(*) FROM association a JOIN entity m ON m.id = a.mirna_entity_id
+            WHERE {where_sql}
+        """, params).fetchone()[0]
+    items = _rows(con, f"""
+        SELECT {_assoc_columns()},
+               e.accession AS term_accession, e.primary_name AS term_name,
+               e.organism AS term_organism,
                m.accession AS mirna_accession, m.primary_name AS mirna_name,
-               m.reference_level, m.organism, m.id AS mirna_entity_id
-        FROM ranked r
-        JOIN entity m ON m.id = r.mirna_entity_id
-        WHERE r.rn = 1
-        ORDER BY r.score DESC LIMIT :lim OFFSET :off
+               m.reference_level, m.organism
+        FROM association a
+        JOIN entity m ON m.id = a.mirna_entity_id
+        JOIN entity e ON e.id = a.term_entity_id
+        WHERE {where_sql}
+        ORDER BY {_rank_key(sort)} DESC, a.score DESC, a.id LIMIT :lim OFFSET :off
     """, params)
 
-    _attach_matched_terms(con, items, term_entity_id, expand)
-    return {"items": items, "total": total, "page": page, "per_page": per_page}
+    result = {"items": items, "total": total, "page": page, "per_page": per_page}
+    if len(_TOP_CACHE) >= _TOP_CACHE_MAX:
+        _TOP_CACHE.clear()
+    _TOP_CACHE[total_key] = total
+    _TOP_CACHE[key] = result
+    return result
 
 
-def _attach_matched_terms(con, items: list[dict], term_entity_id: int,
-                          expand: bool, show: int = 4) -> None:
-    """Which terms each listed miRNA actually matched through -- the answer to
-    'why is this miRNA here?' when the query was expanded over the ontology."""
-    if not items:
-        return
-    ids = [row["mirna_entity_id"] for row in items]
-    placeholders = ",".join("?" * len(ids))
-    descendant_clause = (
-        "OR a.term_entity_id IN (SELECT descendant_id FROM ontology_closure WHERE ancestor_id = ?)"
-        if expand else ""
-    )
-    params = ids + [term_entity_id] + ([term_entity_id] if expand else [])
-    matched: dict[int, list[str]] = {}
-    for row in con.execute(f"""
-        SELECT a.mirna_entity_id, te.primary_name, a.score
+def term_mirnas(con, term_entity_id: int, organism: str | None = "hsa",
+                page: int = 1, per_page: int = PER_PAGE, label: str | None = None) -> dict:
+    """miRNAs associated with a term, by evidence.
+
+    One row per miRNA, and each row is exactly the association of that miRNA with
+    this term: UNIQUE (mirna_entity_id, term_entity_id). Subtype evidence is already
+    in the score through propagation (design notes 5.1b), so the ontology is not
+    expanded again at query time. Listing a miRNA under its best descendant instead
+    (5.1a) made a row stand for an association with some other term than the one
+    looked up.
+
+    Ordered by evidence only: the term's specificity is the same on every row, so
+    relevance would give the same order.
+    """
+    org_filter = "AND m.organism = :org" if organism else ""
+    params = {"tid": term_entity_id, "org": organism, "label": label,
+              "lim": per_page, "off": (page - 1) * per_page}
+    where = f"""
         FROM association a
-        JOIN entity te ON te.id = a.term_entity_id
-        WHERE a.mirna_entity_id IN ({placeholders})
-          AND (a.term_entity_id = ? {descendant_clause})
-        ORDER BY a.score DESC
-    """, params):
-        matched.setdefault(row[0], []).append(row[1])
-
-    for row in items:
-        names = matched.get(row["mirna_entity_id"], [])
-        row["n_terms"] = len(names)
-        row["via_terms"] = " | ".join(sorted(names[:show]))
+        JOIN entity m ON m.id = a.mirna_entity_id
+        WHERE a.term_entity_id = :tid {org_filter} {_label_filter(label)}
+    """
+    total = con.execute("SELECT count(*)" + where, params).fetchone()[0]
+    items = _rows(con, f"""
+        SELECT a.id, a.score, a.n_articles, a.n_direct_articles,
+               a.dominant_label, a.dominant_label_articles,
+               m.accession AS mirna_accession, m.primary_name AS mirna_name,
+               m.reference_level, m.organism
+        {where}
+        ORDER BY a.score DESC, a.id LIMIT :lim OFFSET :off
+    """, params)
+    return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
 def get_association(con: sqlite3.Connection, association_id: int) -> dict | None:
-    return _one(con, """
-        SELECT a.id, a.score, a.term_type,
+    return _one(con, f"""
+        SELECT {_assoc_columns('a', 'te')},
                mi.id AS mirna_entity_id, mi.accession AS mirna_accession,
                mi.primary_name AS mirna_name, mi.reference_level, mi.organism,
                te.id AS term_entity_id, te.accession AS term_accession,
-               te.primary_name AS term_name
+               te.primary_name AS term_name, te.organism AS term_organism
         FROM association a
         JOIN entity mi ON mi.id = a.mirna_entity_id
         JOIN entity te ON te.id = a.term_entity_id
@@ -298,40 +393,120 @@ def get_association(con: sqlite3.Connection, association_id: int) -> dict | None
     """, (association_id,))
 
 
-def association_evidence(con, association_id: int, page: int = 1,
-                         per_page: int = EVIDENCE_PER_PAGE) -> dict:
+def association_ranks(con, association: dict) -> dict:
+    """Where an association stands by evidence among its neighbours.
+
+    Local rather than global on purpose: about half of all associations of every
+    type rest on a single article, so a percentile over all of them puts anything
+    with a handful of articles in the top few percent.
+
+    Within the term, only miRNAs of the same reference level are compared, so a
+    precursor is not ranked against families that pool several precursors.
+    """
+    score = association["score"]
+    in_mirna = con.execute("""
+        SELECT count(*), ifnull(sum(score > :s), 0) FROM association
+        WHERE mirna_entity_id = :m AND term_type = :tt
+    """, {"s": score, "m": association["mirna_entity_id"], "tt": association["term_type"]}).fetchone()
+    in_term = con.execute("""
+        SELECT count(*), ifnull(sum(a.score > :s), 0)
+        FROM association a JOIN entity m ON m.id = a.mirna_entity_id
+        WHERE a.term_entity_id = :t AND m.reference_level IS :lvl
+    """, {"s": score, "t": association["term_entity_id"], "lvl": association["reference_level"]}).fetchone()
+    return {
+        "in_mirna": {"rank": in_mirna[1] + 1, "total": in_mirna[0]},
+        "in_term": {"rank": in_term[1] + 1, "total": in_term[0]},
+    }
+
+
+def association_labels(con, association_id: int) -> dict:
+    """Label breakdown of an association's direct evidence: the labels that state a
+    relation, in display order, and 'none' apart."""
+    by_label = {row["label"]: row for row in _rows(con, """
+        SELECT label, n_articles, n_sentences FROM association_label WHERE association_id = ?
+    """, (association_id,))}
+    return {"relations": [by_label[label] for label in LABELS if label in by_label],
+            "none": by_label.get("none")}
+
+
+def association_subterms(con, association: dict) -> list[dict]:
+    """The miRNA's associations with the descendants of the term that have direct
+    evidence, most direct articles first. A propagated association has no evidence
+    of its own; these hold it. Empty for terms without an ontology (genes) and for
+    roots, whose IC of 0 receives no propagated evidence (analysis.py)."""
+    if not association["ic"]:
+        return []
+    return _rows(con, """
+        SELECT a.id, te.accession AS term_accession, te.primary_name AS term_name, a.n_direct_articles
+        FROM ontology_closure oc
+        JOIN association a ON a.mirna_entity_id = :m AND a.term_entity_id = oc.descendant_id
+        JOIN entity te     ON te.id = a.term_entity_id
+        WHERE oc.ancestor_id = :t AND a.n_direct_articles > 0
+        ORDER BY a.n_direct_articles DESC, te.primary_name
+    """, {"m": association["mirna_entity_id"], "t": association["term_entity_id"]})
+
+
+def evidence_labels(con, association_ids: list[int]) -> list[str]:
+    """The labels of the sentences of these associations, in display order, 'none' last."""
+    present = {row[0] for row in con.execute(
+        "SELECT DISTINCT label FROM association_label WHERE association_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(association_ids),))}
+    return [label for label in (*LABELS, "none") if label in present]
+
+
+def association_evidence(con, association_id: int, page: int = 1, per_page: int = EVIDENCE_PER_PAGE,
+                         label: str | None = None, sort: str = "article", subterms: list[dict] = ()) -> dict:
     """Evidence sentences, paginated by SENTENCE rather than by evidence row.
 
     A sentence can carry several (miRNA span, term span) pairs -- the largest
     association has 23,810 evidence rows over 16,228 distinct sentences -- so
     paginating by row would show the same sentence repeatedly.
-    """
-    total = con.execute(
-        "SELECT count(DISTINCT sentence_id) FROM association_evidence WHERE association_id = ?",
-        (association_id,),
-    ).fetchone()[0]
 
-    rows = _rows(con, """
-        WITH page AS (
-            -- ordered by sentence_id, which ix_ae_assoc(association_id, sentence_id)
-            -- already provides: DISTINCT and ORDER BY are then a range scan over the
-            -- page rather than a group-and-sort over every row of the association.
-            -- Sentence ids are assigned in corpus order, so this is article order.
-            SELECT DISTINCT ae.sentence_id
-            FROM association_evidence ae
-            WHERE ae.association_id = :aid
-            ORDER BY ae.sentence_id LIMIT :lim OFFSET :off
-        )
-        SELECT p.sentence_id, s.sentence_text, s.section_num,
+    With a label, only the sentences with at least one pair of that label. A card
+    still shows every pair and label of its sentence.
+
+    With subterms (association_subterms), also the sentences of those associations;
+    a card then lists the subterms its pairs come from under `via`.
+    """
+    assert sort in EVIDENCE_SORTS, sort
+    via = {s["id"]: s for s in subterms}
+
+    def pairs(joined: bool) -> str:
+        # mention_pair only when a label or the confidence order needs it: without it
+        # ix_ae_assoc covers the count and the article order (notes/DATABASE_EVALUATION.md, finding 5)
+        return f"""
+            FROM association_evidence ae {"JOIN mention_pair mp ON mp.id = ae.mention_pair_id" if joined else ""}
+            WHERE ae.association_id IN (SELECT value FROM json_each(:ids)) {"AND mp.label = :label" if label else ""}
+        """
+    params = {"ids": json.dumps([association_id, *via]), "label": label,
+              "lim": per_page, "off": (page - 1) * per_page}
+    total = con.execute("SELECT count(DISTINCT ae.sentence_id)" + pairs(bool(label)), params).fetchone()[0]
+
+    if sort == "article":
+        # sentence ids are assigned in corpus order; ix_ae_assoc provides them sorted for one association
+        order = "ae.sentence_id"
+    elif label:
+        order = "max(mp.confidence) DESC, ae.sentence_id"
+    else:
+        # by the most confident stated relation; sentences with only 'none' come last
+        order = "max(CASE WHEN mp.label != 'none' THEN mp.confidence END) DESC, ae.sentence_id"
+    sentence_ids = [row[0] for row in con.execute(
+        f"SELECT ae.sentence_id {pairs(bool(label) or sort == 'confidence')} "
+        f"GROUP BY ae.sentence_id ORDER BY {order} LIMIT :lim OFFSET :off",
+        params)]
+
+    rows = _rows(con, f"""
+        SELECT ae.association_id, ae.sentence_id, s.sentence_text, s.section_num,
                ar.external_id, ar.year, ar.journal,
-               ae.mirna_start, ae.mirna_end, ae.term_start, ae.term_end
-        FROM page p
-        JOIN association_evidence ae
-             ON ae.sentence_id = p.sentence_id AND ae.association_id = :aid
-        JOIN sentence s ON s.id = p.sentence_id
+               ae.mirna_start, ae.mirna_end, ae.term_start, ae.term_end,
+               mp.label, mp.confidence
+        FROM association_evidence ae
+        JOIN mention_pair mp ON mp.id = ae.mention_pair_id
+        JOIN sentence s ON s.id = ae.sentence_id
         JOIN article ar ON ar.id = s.article_id
-        ORDER BY p.sentence_id
-    """, {"aid": association_id, "lim": per_page, "off": (page - 1) * per_page})
+        WHERE ae.association_id IN (SELECT value FROM json_each(?))
+          AND ae.sentence_id IN ({",".join("?" * len(sentence_ids))})
+    """, [params["ids"], *sentence_ids])
 
     grouped: dict[int, dict] = {}
     for row in rows:
@@ -343,14 +518,27 @@ def association_evidence(con, association_id: int, page: int = 1,
             "year": row["year"],
             "journal": row["journal"],
             "spans": [],
+            "confidences": {},
+            "via": {},
         })
         text = row["sentence_text"]
         card["spans"].append(extend_mirna_span(text, row["mirna_start"], row["mirna_end"]) + ("mir",))
         card["spans"].append((row["term_start"], row["term_end"], "term"))
+        if row["association_id"] in via:
+            card["via"][row["association_id"]] = via[row["association_id"]]
+        if row["label"]:     # NULL for a pair the model could not label
+            best = card["confidences"].get(row["label"], 0)
+            card["confidences"][row["label"]] = max(best, row["confidence"])
 
-    items = list(grouped.values())
+    items = [grouped[sentence_id] for sentence_id in sentence_ids]
     for card in items:
         card["html"] = render(card["text"], card["spans"])
+        card["via"] = list(card["via"].values())
+        # one entry per distinct label of the sentence's pairs, most confident first
+        card["labels"] = [
+            {"label": pair_label, "confidence": confidence, "level": confidence_level(confidence)}
+            for pair_label, confidence in sorted(card["confidences"].items(), key=lambda kv: -kv[1])
+        ]
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
@@ -446,3 +634,56 @@ def organisms(con: sqlite3.Connection, limit: int = 30) -> list[dict]:
             GROUP BY m.organism ORDER BY n DESC LIMIT ?
         """, (limit,))
     return _ORGANISM_CACHE
+
+
+_LANDING_CACHE: dict | None = None
+
+
+def landing_stats(con: sqlite3.Connection) -> dict:
+    """Database contents for the landing page. Scans every association, so it is
+    cached like the organism menu."""
+    global _LANDING_CACHE
+    if _LANDING_CACHE is None:
+        by_type, by_label, total = {}, {}, 0
+        for term_type, label, direct, n in con.execute("""
+            SELECT term_type, dominant_label, n_direct_articles > 0, count(*) FROM association GROUP BY 1, 2, 3
+        """):
+            counts = by_type.setdefault(term_type, {"direct": 0, "propagated": 0})
+            counts["direct" if direct else "propagated"] += n
+            if label:
+                by_label[label] = by_label.get(label, 0) + n
+            total += n
+        n_mirnas, n_terms = con.execute(
+            "SELECT count(DISTINCT mirna_entity_id), count(DISTINCT term_entity_id) FROM association").fetchone()
+        n_articles, n_undated = con.execute("SELECT count(*), sum(year IS NULL) FROM article").fetchone()
+        n_early = con.execute("SELECT ifnull(sum(n_articles), 0) FROM corpus_year WHERE year < ?",
+                              (CORPUS_TIMELINE_START,)).fetchone()[0]
+        _LANDING_CACHE = {
+            "n_mirnas": n_mirnas, "n_terms": n_terms, "n_associations": total,
+            "n_articles": n_articles, "n_undated": n_undated, "n_early": n_early,
+            "types": sorted(({"type": t, **c} for t, c in by_type.items()),
+                            key=lambda r: r["direct"] + r["propagated"], reverse=True),
+            "labels": sorted(({"label": l, "n": n} for l, n in by_label.items()), key=lambda r: r["n"], reverse=True),
+            "n_no_label": total - sum(by_label.values()),
+        }
+    return _LANDING_CACHE
+
+
+def corpus_timeline(con: sqlite3.Connection) -> list[dict]:
+    """Articles per year in the corpus, for the landing page."""
+    return _rows(con, "SELECT year, n_articles FROM corpus_year WHERE year >= ? ORDER BY year",
+                 (CORPUS_TIMELINE_START,))
+
+
+_LABELS_CACHE: dict[str, list[str]] | None = None
+
+
+def labels_by_type(con: sqlite3.Connection) -> dict[str, list[str]]:
+    """The dominant labels that occur per term type, for the filter menu
+    ('targets' exists for genes only). Cached like the organism menu."""
+    global _LABELS_CACHE
+    if _LABELS_CACHE is None:
+        found = {(row[0], row[1]) for row in con.execute(
+            "SELECT DISTINCT term_type, dominant_label FROM association WHERE dominant_label IS NOT NULL")}
+        _LABELS_CACHE = {t: [label for label in LABELS if (t, label) in found] for t in TERM_TYPES}
+    return _LABELS_CACHE

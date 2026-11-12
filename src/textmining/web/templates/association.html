@@ -1,32 +1,113 @@
 {% extends "base.html" %}
 {% from "_pagination.html" import pager %}
 {% from "_timeline.html" import timeline %}
+{% from "_ranking.html" import qs, ic_bar, num, label_chip, label_filter %}
 {% block title %}{{ association.mirna_name }} &ndash; {{ association.term_name }}{% endblock %}
 {% block content %}
 <h1><a href="/mirna/{{ association.mirna_accession }}">{{ association.mirna_name }}</a>
     <span class="muted">&mdash;</span>
-    <a href="/term/{{ association.term_accession }}">{{ association.term_name }}</a></h1>
+    <a href="/term/{{ association.term_accession|urlencode }}">{{ association.term_name }}</a></h1>
 <p class="ids">
   <code>{{ association.mirna_accession }}</code> &middot; <code>{{ association.term_accession }}</code>
   <span class="badge">{{ association.term_type|lower|replace('_',' ') }}</span>
-  <span class="badge subtle">score {{ '%.2f'|format(association.score) }}</span>
+  {% if not ranked and association.term_organism %}<span class="badge subtle">{{ association.term_organism }}</span>{% endif %}
+  {% if ranked %}<span class="badge subtle">specificity {{ ic_bar(association.ic) }}</span>{% endif %}
 </p>
+
+<section class="score">
+  {% if ranked %}<div class="stat"><span class="value">{{ num(association.relevance) }}</span><span class="label">relevance</span></div>{% endif %}
+  <div class="stat"><span class="value">{{ num(association.score) }}</span><span class="label">evidence</span></div>
+  <div class="stat"><span class="value">{{ '{:,}'.format(association.n_articles) }}</span>
+    <span class="label">article{{ '' if association.n_articles == 1 else 's' }}
+      {%- if ranked %} &middot; {{ '{:,}'.format(association.n_direct_articles) }} direct{% endif %}</span></div>
+  {# ranks scan every association of the miRNA and the term, so they load after the page #}
+  <div class="stat" data-ranks hidden>
+    <a class="value" href="/mirna/{{ association.mirna_accession }}?type={{ association.term_type }}&sort=evidence">#<span data-rank="in_mirna.rank"></span></a>
+    <span class="label">of <span data-rank="in_mirna.total"></span> {{ type_plurals[association.term_type] }} for this miRNA</span></div>
+  <div class="stat" data-ranks hidden>
+    <a class="value" href="/term/{{ association.term_accession|urlencode }}?organism=">#<span data-rank="in_term.rank"></span></a>
+    <span class="label">of <span data-rank="in_term.total"></span> {{ level_plurals[association.reference_level] }} for this term</span></div>
+  <p class="muted" data-ranks hidden>Both ranks order by evidence.</p>
+</section>
+
+<h2>Relations</h2>
+{# relation counts are direct only, so their links narrow the sentences to the term itself #}
+{% set direct = association.term_accession if subterms else none %}
+{% if association.n_direct_articles == 0 %}
+<p class="notice subtle">No sentence names this term directly; the sentences <a href="#evidence">below</a>
+  mention its subterms.</p>
+{% elif not breakdown.relations %}
+<p class="notice subtle">None of the sentences mentioning this pair states a relation.</p>
+{% else %}
+<div class="rel-bar">
+  {% for r in breakdown.relations %}<span class="rel-{{ r.label }}" style="flex: {{ r.n_articles }}"
+    title="{{ r.label|replace('_', ' ') }}: {{ r.n_articles }} articles"></span>{% endfor %}
+</div>
+<p class="rel-legend">
+  {% for r in breakdown.relations %}
+  <a href="{{ qs({'label': r.label, 'sort': sort, 'via': direct}) }}#evidence">{{ label_chip(r.label) }}
+    {{ '{:,}'.format(r.n_articles) }} article{{ '' if r.n_articles == 1 else 's' }}</a>
+  {% endfor %}
+</p>
+{% endif %}
+{% if association.n_direct_articles %}
+<p class="muted small">
+  Articles per relation, out of {{ '{:,}'.format(association.n_direct_articles) }} with direct evidence.
+  An article counts for every relation that at least one of its sentences states, so the counts can add up
+  to more than the total.
+  {% if breakdown.none %}In <a href="{{ qs({'label': 'none', 'sort': sort, 'via': direct}) }}#evidence">{{ '{:,}'.format(breakdown.none.n_articles) }}
+  article{{ '' if breakdown.none.n_articles == 1 else 's' }}</a> at least one sentence mentions the pair without
+  stating a relation.{% endif %}
+  A language model assigns the relation per sentence and is wrong for about 1 sentence in 5: a small count
+  for the opposite direction is expected from that alone and is not by itself a conflict in the literature.
+</p>
+{% endif %}
 
 <h2>Evidence timeline</h2>
-{{ timeline('assoc-timeline', '/api/association/' ~ association.id ~ '/timeline', 'This association') }}
-<p class="muted">
-  Faint series: the overall research timeline of
-  <a href="/mirna/{{ association.mirna_accession }}">{{ association.mirna_name }}</a>, for context &mdash;
-  does this association track the miRNA&rsquo;s general attention, or is it a distinct wave?
-</p>
+{{ timeline('assoc-timeline', '/api/association/' ~ association.id ~ '/timeline' ~ ('?via=' ~ via|urlencode if via else ''), 'This association') }}
 
-<h2>Supporting sentences</h2>
+<h2 id="evidence">Supporting sentences</h2>
+{% if subterms %}
+{# the most cited subterms; one that is selected but not among them is added #}
+{% set shown = subterms[:8] + subterms[8:]|selectattr('term_accession', 'equalto', via)|list %}
+<nav class="filters sort">
+  <span class="label">Term</span>
+  <a href="{{ qs({'label': label, 'sort': sort}) }}#evidence" class="{{ 'on' if not via }}"
+     title="Sentences naming this term or any of its subterms">all
+    <span class="small">{{ '{:,}'.format(association.n_articles) }}</span></a>
+  {% if association.n_direct_articles %}
+  <a href="{{ qs({'via': association.term_accession, 'label': label, 'sort': sort}) }}#evidence"
+     class="{{ 'on' if via == association.term_accession }}"
+     title="Sentences naming {{ association.term_name }} itself">direct only
+    <span class="small">{{ '{:,}'.format(association.n_direct_articles) }}</span></a>
+  {% endif %}
+  {% for s in shown %}
+  <a href="{{ qs({'via': s.term_accession, 'label': label, 'sort': sort}) }}#evidence"
+     class="{{ 'on' if via == s.term_accession }}">{{ s.term_name }}
+    <span class="small">{{ '{:,}'.format(s.n_direct_articles) }}</span></a>
+  {% endfor %}
+</nav>
+{% endif %}
+{{ label_filter(labels, label, {'sort': sort, 'via': via}, '#evidence') }}
+{% if labels %}
+<nav class="filters sort">
+  <span class="label">Order</span>
+  <a href="{{ qs({'label': label, 'sort': 'article', 'via': via}) }}#evidence" class="{{ 'on' if sort == 'article' }}">Article</a>
+  <a href="{{ qs({'label': label, 'sort': 'confidence', 'via': via}) }}#evidence" class="{{ 'on' if sort == 'confidence' }}"
+     title="Sentences the model is most sure about first">Model confidence</a>
+</nav>
+{% endif %}
 {% if evidence['items'] %}
 <ul class="evidence">
   {% for card in evidence['items'] %}
   <li>
     <p class="sentence">{{ card.html|safe }}</p>
     <p class="meta">
+      {% if card.via %}via {% for s in card.via %}<a href="/association/{{ s.id }}">{{ s.term_name }}</a>{{ ", " if not loop.last }}{% endfor %} &middot;{% endif %}
+      {% for l in card.labels %}
+        <span title="model probability {{ '%.2f'|format(l.confidence) }}">{{ label_chip(l.label) }}
+          <span class="small">{{ l.level }}</span></span> &middot;
+      {% endfor %}
       {% if card.external_id.startswith('PMC') %}
         <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/{{ card.external_id }}/" rel="noopener">{{ card.external_id }}</a>
       {% else %}
@@ -39,7 +120,11 @@
   </li>
   {% endfor %}
 </ul>
-{{ pager(evidence, '?') }}
+{{ pager(evidence, qs({'label': label, 'sort': sort, 'via': via})) }}
+<p class="muted small">
+  The relation of each sentence comes from a language model. <em>high</em>, <em>medium</em> and <em>low</em>
+  say how sure the model is; they order sentences reliably but are not the probability of being correct.
+</p>
 <p class="muted small">
   miRNA highlights are extended rightward from the stored span: the extraction regex matches only
   the stem (<code>miR</code>) and the identifying digits are not stored. In enumerations such as
@@ -51,4 +136,16 @@
 {% endblock %}
 {% block scripts %}
 <script>window.__contextTimeline = "/api/mirna/{{ association.mirna_accession }}/timeline";</script>
+<script>
+  (async () => {
+    const response = await fetch("/api/association/{{ association.id }}/ranks");
+    if (!response.ok) return;
+    const ranks = await response.json();
+    for (const span of document.querySelectorAll("[data-rank]")) {
+      const [scope, field] = span.dataset.rank.split(".");
+      span.textContent = ranks[scope][field].toLocaleString("en-US");
+    }
+    document.querySelectorAll("[data-ranks]").forEach(el => { el.hidden = false; });
+  })();
+</script>
 {% endblock %}

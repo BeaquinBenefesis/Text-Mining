@@ -1,0 +1,93 @@
+{# Shared pieces for ranked association tables: query strings, sort toggle, specificity. #}
+
+{# "?k=v&..." ending in "&", ready for a pager's "page=". None values are dropped;
+   empty strings are kept, because a blank organism/level means "all", not the default. #}
+{% macro qs(params) -%}
+?{% for k, v in params.items() if v is not none %}{{ k }}={{ v|urlencode }}&{% endfor %}
+{%- endmacro %}
+
+{% macro sort_toggle(sort, params) %}
+<nav class="filters sort">
+  <span class="label">Sort</span>
+  <a href="{{ qs(dict(params, sort='relevance')) }}" class="{{ 'on' if sort == 'relevance' }}"
+     title="Evidence discounted by term specificity: general ontology terms rank lower">Relevance</a>
+  <a href="{{ qs(dict(params, sort='evidence')) }}" class="{{ 'on' if sort == 'evidence' }}"
+     title="Amount of literature support only">Evidence</a>
+</nav>
+{% endmacro %}
+
+{# A relation label, coloured by label (style.css .rel-*). #}
+{% macro label_chip(label) -%}
+<span class="rel rel-{{ label }}">{{ label|replace('_', ' ') }}</span>
+{%- endmacro %}
+
+{# The Relation cell of an association row: its dominant label and the direct articles behind it. #}
+{% macro label_cell(row) -%}
+{% if row.dominant_label -%}
+{{ label_chip(row.dominant_label) }} <span class="muted small" title="{{ row.dominant_label_articles }} of {{ row.n_direct_articles }} articles with direct evidence">{{ '{:,}'.format(row.dominant_label_articles) }}/{{ '{:,}'.format(row.n_direct_articles) }}</span>
+{%- elif row.n_direct_articles == 0 -%}
+<span class="muted" title="no direct evidence: supported only through more specific terms">&ndash;</span>
+{%- else -%}
+<span class="muted" title="no relation stated in the direct evidence">&ndash;</span>
+{%- endif %}
+{%- endmacro %}
+
+{# Links that filter a list by label; params are the other query parameters of the page. #}
+{% macro label_filter(labels, selected, params, anchor='') %}
+{% if labels %}
+<nav class="filters sort">
+  <span class="label">Relation</span>
+  <a href="{{ qs(params) }}{{ anchor }}" class="{{ 'on' if not selected }}">all</a>
+  {% for l in labels %}
+  <a href="{{ qs(dict(params, label=l)) }}{{ anchor }}" class="{{ 'on' if selected == l }}">{{ l|replace('_', ' ') }}</a>
+  {% endfor %}
+</nav>
+{% endif %}
+{% endmacro %}
+
+{% macro label_help(selected) %}
+<p class="muted small">
+  <strong>Relation</strong> is the leading relation among the sentences that mention this pair directly,
+  with the number of those articles that state it. A language model assigns it per sentence and is wrong
+  for about 1 sentence in 5, so a label resting on few articles is weak.
+  {% if selected %}Associations supported only through more specific terms have no relation and are not
+  listed under a relation filter.{% endif %}
+</p>
+{% endmacro %}
+
+{# Opening tag of a row that stands for one association: the whole row opens it (rows.js). #}
+{% macro assoc_row(id) -%}
+<tr class="assoc" data-href="/association/{{ id }}" tabindex="0" role="link">
+{%- endmacro %}
+
+{% macro ic_bar(ic) -%}
+{% if ic is not none -%}
+<span class="ic-bar" title="specificity (normalised IC) {{ '%.2f'|format(ic) }}"><span style="width: {{ '%.0f'|format(ic * 100) }}%"></span></span>
+{%- else -%}
+<span class="muted" title="no specificity for this term (not in the current ontology)">&ndash;</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro num(value) -%}
+{{ '%.2f'|format(value) if value is not none else '–' }}
+{%- endmacro %}
+
+{% macro articles(row) -%}
+<span title="{{ row.n_direct_articles }} with direct evidence, {{ row.n_articles - row.n_direct_articles }} only via ontology subtypes">{{ '{:,}'.format(row.n_articles) }}</span>
+{%- if row.n_direct_articles != row.n_articles %} <span class="muted small">({{ '{:,}'.format(row.n_direct_articles) }} direct)</span>{% endif %}
+{%- endmacro %}
+
+{% macro help(ranked=true) %}
+<p class="muted small">
+  {% if ranked %}
+  <strong>Relevance</strong> is the evidence discounted by how specific the term is, so broad ontology
+  terms (<em>disease</em>, <em>cancer</em>) rank below well-supported specific ones.
+  <strong>Evidence</strong> is the amount of literature support alone. Specificity is the term's
+  position in its ontology (0 = root, 1 = leaf). It is not calibrated across ontologies, which is why
+  each list shows one term type.
+  {% else %}
+  <strong>Evidence</strong> is the amount of literature support. Genes come from a synonym dictionary,
+  not an ontology, so they have no specificity and no relevance: the list is ordered by evidence alone.
+  {% endif %}
+</p>
+{% endmacro %}
