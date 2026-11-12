@@ -8,8 +8,7 @@ name. Two consumers:
 
 The files are a superset of `*_id_conflicts.tsv`: conflicted names are exactly
 those mapping to more than one accession here. Deriving them means the conflict
-files are not needed as a separate input -- which also sidesteps the duplicated
-header row those two files carry.
+files are not needed as a separate input.
 """
 import csv
 import logging

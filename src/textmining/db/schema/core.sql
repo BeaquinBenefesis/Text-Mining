@@ -6,7 +6,8 @@ CREATE TABLE entity(
     source TEXT NOT NULL,
     obsolete INTEGER NOT NULL,
     reference_level TEXT,  -- 'family' | 'precursor' | 'mature'; NULL for non-MIR rows
-    organism TEXT          -- miRBase 3-letter prefix ('hsa'); NULL for non-MIR rows
+    organism TEXT,         -- MIR: miRBase 3-letter prefix ('hsa'); GENE: common name ('human'); NULL for ontology terms
+    ic REAL                -- normalised structural IC (IC / ln N) on the restricted graph, in [0, 1]; NULL for MIR and GENE
 ) STRICT;
 
 CREATE TABLE synonym(
@@ -22,7 +23,12 @@ CREATE TABLE association(
     mirna_entity_id INTEGER NOT NULL,
     term_entity_id INTEGER NOT NULL,
     term_type TEXT NOT NULL,
-    score REAL NOT NULL,
+    score REAL NOT NULL,            -- log2(1 + evidence_mass)
+    evidence_mass REAL NOT NULL,    -- E: sum of per-article log2(1 + s_a), before the outer log; rank weightings act on this
+    n_articles INTEGER NOT NULL,    -- number of articles supporting the association
+    n_direct_articles INTEGER NOT NULL, -- number of articles supporting the association (w/o propagation)
+    dominant_label TEXT,            -- leading relation label of the direct evidence, never 'none'; NULL if there is none
+    dominant_label_articles INTEGER, -- direct articles with that label
     FOREIGN KEY (mirna_entity_id) REFERENCES entity,
     FOREIGN KEY (term_entity_id) REFERENCES entity,
     UNIQUE (mirna_entity_id, term_entity_id)
@@ -39,13 +45,15 @@ CREATE TABLE ontology_closure(
 CREATE TABLE association_evidence(
     id INTEGER PRIMARY KEY,
     association_id INTEGER NOT NULL,
+    mention_pair_id INTEGER NOT NULL,
     sentence_id INTEGER NOT NULL,
     mirna_start INTEGER NOT NULL,
     mirna_end INTEGER NOT NULL,
     term_start INTEGER NOT NULL,
     term_end INTEGER NOT NULL,
     FOREIGN KEY (association_id) REFERENCES association,
-    FOREIGN KEY (sentence_id) REFERENCES sentence
+    FOREIGN KEY (sentence_id) REFERENCES sentence,
+    FOREIGN KEY (mention_pair_id) REFERENCES mention_pair
 ) STRICT;
 
 CREATE TABLE article(
@@ -63,6 +71,37 @@ CREATE TABLE sentence(
     sentence_text TEXT NOT NULL,
     FOREIGN KEY (article_id) REFERENCES article,
     UNIQUE (article_id, section_num, sentence_num)
+) STRICT;
+
+CREATE TABLE mention_pair(
+    id INTEGER PRIMARY KEY,
+    sentence_id INTEGER NOT NULL,
+    mirna_start INTEGER NOT NULL,
+    mirna_end INTEGER NOT NULL,
+    term_start INTEGER NOT NULL,
+    term_end INTEGER NOT NULL,
+    term_type TEXT NOT NULL,
+    label TEXT, -- the top label, NULL if the pair could not be labeld
+    confidence REAL, -- probability of the top label
+    p_none REAL,
+    p_associated REAL,
+    p_biomarker REAL,
+    p_expressed REAL,
+    p_expression_down REAL,
+    p_expression_up REAL,
+    p_inhibits REAL,
+    p_promotes REAL,
+    p_targets REAL,
+    FOREIGN KEY (sentence_id) REFERENCES sentence
+) STRICT;
+
+CREATE TABLE association_label(
+    association_id INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    n_articles INTEGER NOT NULL,
+    n_sentences INTEGER NOT NULL,
+    FOREIGN KEY (association_id) REFERENCES association,
+    PRIMARY KEY (association_id, label)
 ) STRICT;
 
 -- ============================================================================
@@ -95,6 +134,18 @@ CREATE TABLE mir_mention_article(
 CREATE TABLE corpus_year(
     year       INTEGER PRIMARY KEY,
     n_articles INTEGER NOT NULL
+) STRICT;
+
+-- Article count per mentioned miRNA with its rank among the miRNAs of the same
+-- reference level and organism (loaders/mirna_stats.py). The UI recomputes the
+-- counts of the one miRNA it shows; only the rank needs the whole population.
+CREATE TABLE mirna_stats(
+    entity_id  INTEGER PRIMARY KEY,
+    n_articles INTEGER NOT NULL,   -- articles mentioning the miRNA
+    breadth    INTEGER NOT NULL,   -- number of associated terms
+    pop_rank   INTEGER NOT NULL,   -- 1 = most articles in its population
+    pop_size   INTEGER NOT NULL,
+    FOREIGN KEY (entity_id) REFERENCES entity
 ) STRICT;
 
 -- ============================================================================
@@ -153,6 +204,7 @@ CREATE INDEX ix_assoc_mir_score  ON association(mirna_entity_id, score DESC);
 CREATE INDEX ix_assoc_term_score ON association(term_entity_id, score DESC);
 CREATE INDEX ix_sentence_article ON sentence(article_id);
 CREATE INDEX ix_synonym_entity   ON synonym(entity_id);
+CREATE INDEX ix_assoc_label ON association_label(label, association_id);
 -- No index on entity(entity_type, organism): it was tried and EXPLAIN QUERY PLAN
 -- never chose it (49.9MB wasted). Organism filtering always reaches entity by
 -- rowid from association and then tests the column, so the index is never the

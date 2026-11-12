@@ -1,10 +1,13 @@
+import argparse
 import logging
+from pathlib import Path
 from textmining.logging_utils import setup_logging
 from textmining.paths import DB_DIR, OUTPUTS_DIR
-from textmining.db.connect import open_for_build
+from textmining.db.connect import open_for_build, DB_PATH
+from textmining.db import exports
 from textmining.db.loaders import (
     entity, synonym, corpus, ontology_closure, association, article_metadata,
-    mentions, mirna_history, search,
+    mentions, mirna_history, search, gene, mirna_stats,
 )
 from textmining.resources import ONTOLOGY_SOURCES
 from textmining.ontology import OntologyGraph
@@ -16,28 +19,28 @@ import textmining.resources as res
 logger = logging.getLogger('textmining.db.build_db')
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Build the knowledgebase database from one pipeline run.")
+    parser.add_argument("--run", default="new_full_run_w_genes",
+                        help="run name: reads outputs/<run>/<run>.{assoc,cooc,labels,norm}")
+    parser.add_argument("--run-dir", type=Path, help="directory holding the run's files (default: outputs/<run>)")
+    parser.add_argument("--db", type=Path, default=DB_PATH,
+                        help="database to write; an existing file is replaced (default: db/atlas.db)")
+    args = parser.parse_args()
+
     setup_logging(output_dir=DB_DIR, run_name='db_build_log')
-    con = open_for_build()
+    con = open_for_build(args.db)
     ontology_graphs = {}
-    output_name = 'full_run'   # swap this
-    output_dir = OUTPUTS_DIR / output_name
+    output_name = args.run
+    output_dir = args.run_dir or OUTPUTS_DIR / output_name
     coocs_path = output_dir / f'{output_name}.cooc'
+    labels_path = output_dir / f'{output_name}.labels'
     assoc_path = output_dir / f'{output_name}.assoc'
     norm_path = output_dir / f'{output_name}.norm'
     article_file_pattern = str(res.CORPUS_DIR / "*.sent")
 
     logger.info("Building from run=%s (coocs=%s, assoc=%s)", output_name, coocs_path, assoc_path)
 
-    # TAXON is skipped, and skipping it here is enough: load_entities,
-    # load_synonyms and load_ontology_closure all just iterate ontology_graphs.
-    # Taxa are disambiguation context for miRNA normalization
-    # (NormalizationContext.get_taxon_relevance) and that work happens at
-    # EXTRACTION time, upstream of this database -- by the time .norm exists the
-    # species is baked into the accession. Nothing here references a taxon:
-    # measured 0 associations, 0 closure rows, 0 mentions, against 2.85M entity
-    # and 2.97M synonym rows and 27.5s of graph load. Design notes section 4
-    # already excluded taxonomy from the closure for the same semantic reason.
-    # If organism rollup is ever wanted it is ~30 curated rows, not 2.85M.
+    # TAXON is skipped, the user cant query for taxon entities and it is not referenced from any associations
     sources = {t: s for t, s in ONTOLOGY_SOURCES.items() if t is not HitType.TAXON}
     logger.info("Loading %d ontology graph(s) (TAXON skipped)", len(sources))
     for entity_type, source in sources.items():
@@ -59,6 +62,10 @@ if __name__ == '__main__':
         logger.info("Loading synonyms")
         synonym.load_synonyms(con, ontology_graphs)
 
+        logger.info("Loading genes from %s", res.GENE_SYNS)
+        gene.load_gene_entities(con, res.GENE_SYNS, res.GENE_SYNS_RAW, res.GENE_ORGANISM_MAP)
+        gene.load_gene_synonyms(con, res.GENE_SYNS)
+
         logger.info("Loading miRBase name history")
         mirna_history.load_mirna_name_history(con, history_rows)
 
@@ -68,8 +75,12 @@ if __name__ == '__main__':
         logger.info("Loading associations from %s", assoc_path)
         association.load_associations(con, assoc_path)
 
-        logger.info("Loading corpus (article/sentence/association_evidence) from %s", coocs_path)
-        corpus.load_corpus(con, coocs_path, article_reader)
+        logger.info("Loading corpus (article/sentence/mention_pair/association_evidence) from %s and %s", coocs_path, labels_path)
+        corpus.load_corpus(con, coocs_path, labels_path, article_reader)
+
+        # Needs association_evidence and mention_pair.
+        logger.info("Loading association labels")
+        association.load_association_labels(con)
 
         logger.info("Loading ontology closure")
         ontology_closure.load_ontology_closure(con, ontology_graphs)
@@ -87,13 +98,22 @@ if __name__ == '__main__':
         logger.info("Computing corpus_year")
         mentions.load_corpus_year(con)
 
+        # Needs association and mir_mention_article.
+        logger.info("Ranking miRNAs by article count")
+        mirna_stats.load_mirna_stats(con)
+
         # Last: reads association, ontology_closure, mir_mention_article and synonym.
         logger.info("Building search index")
         search.load_search_names(con)
 
     logger.info("Build complete, row counts:")
     for table in ("entity", "synonym", "association", "ontology_closure", "article", "sentence",
-                  "association_evidence", "mir_mention_article", "mirna_name_history",
-                  "corpus_year", "search_name"):
+                  "mention_pair", "association_evidence", "association_label", "mir_mention_article", "mirna_name_history",
+                  "corpus_year", "mirna_stats", "search_name"):
         count = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
         logger.info("  %-22s %d", table, count)
+
+    downloads_dir = args.db.parent / "downloads"
+    logger.info("Writing download files to %s", downloads_dir)
+    exports.export_hits(norm_path, downloads_dir)
+    exports.export_associations(con, downloads_dir)

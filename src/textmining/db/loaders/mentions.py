@@ -36,7 +36,7 @@ def _blacklist_key_sql() -> str:
 
 _MENTION_SQL = """
 SELECT
-  CASE WHEN norm_status IN ('NORMALIZED','FALLBACK') THEN normalized_id
+  CASE WHEN norm_status IN ('NORMALIZED','FALLBACK','ARM_FALLBACK') THEN normalized_id
        WHEN norm_status = 'IN_BLACKLIST'             THEN {blacklist_key}
   END                                   AS mir_key,
   split_part(sentence_id, '.', 1)       AS external_id,
@@ -44,7 +44,7 @@ SELECT
 FROM read_csv(?, delim='\t', header=true, quote='', escape='',
               ignore_errors=true, sample_size=-1)
 WHERE entity_type = 'MIR'
-  AND norm_status IN ('NORMALIZED','FALLBACK','IN_BLACKLIST')
+  AND norm_status IN ('NORMALIZED','FALLBACK','ARM_FALLBACK','IN_BLACKLIST')
 """
 
 

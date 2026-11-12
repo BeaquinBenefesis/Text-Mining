@@ -1,7 +1,7 @@
 import logging
 import re
 import sqlite3
-
+import math
 from textmining.config import MirbaseResources
 from textmining.mirbase import load_mirbase
 from textmining.enums import HitType
@@ -13,8 +13,8 @@ from textmining.db.loaders.mirna_history import latest_row_per_accession
 logger = logging.getLogger(__name__)
 
 _ENTITY_INSERT = """INSERT INTO entity
-    (accession, primary_name, entity_type, source, obsolete, reference_level, organism)
-    VALUES (:accession, :primary_name, :entity_type, :source, :obsolete, :reference_level, :organism)"""
+    (accession, primary_name, entity_type, source, obsolete, reference_level, organism, ic)
+    VALUES (:accession, :primary_name, :entity_type, :source, :obsolete, :reference_level, :organism, :ic)"""
 
 # miRBase prefixes run 3-7 characters ('hsa', 'kshv', 'ptvpv2a'); 277 distinct
 # prefixes appear in the history files and all but two fit [a-z][a-z0-9]{2,4},
@@ -64,6 +64,7 @@ def load_entities(
                 "obsolete": latest.get(node["accession"], {}).get("dead", 0),
                 "reference_level": node["type"],
                 "organism": organism_from_name(node["name"], node["type"]),
+                "ic": None,
             }
             for node in nodes.values()
         ],
@@ -87,6 +88,7 @@ def load_entities(
                     "obsolete": 0,
                     "reference_level": None,
                     "organism": None,
+                    "ic": max(0.0, graph.compute_ic(node["id"]) / math.log(graph.node_num))
                 }
                 for node in graph.iter_nodes(ontology_roots.get(entity_type, None))
                 if node.get("name")
@@ -113,6 +115,7 @@ def _load_retired_accessions(con: sqlite3.Connection, latest: dict[str, dict], k
             "obsolete": 1,
             "reference_level": row["reference_level"],
             "organism": organism_from_name(row["mirna_name"], row["reference_level"]),
+            "ic": None,
         }
         for accession, row in latest.items()
         if accession not in known
