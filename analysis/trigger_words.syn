@@ -1,0 +1,53 @@
+associated:associate|associates|associated|associating|association|associations
+associated:correlate|correlates|correlated|correlating|correlation|correlations
+associated:link|links|linked|linking
+associated:involve|involves|involved|involving|involvement
+associated:implicate|implicates|implicated|implicating|implication
+associated:participate|participates|participated|participating|participation
+associated:contribute|contributes|contributed|contributing|contribution
+associated:influence|influences|influenced|influencing
+associated:modulate|modulates|modulated|modulating|modulation
+associated:regulate|regulates|regulated|regulating|regulation
+associated:regulator|regulators|regulatory|role|roles
+biomarker:biomarker|biomarkers|marker|markers|diagnosis|diagnostic|diagnostics
+biomarker:prognosis|prognostic|predictor|predictors|predictive
+biomarker:survival|roc|auc|area under the curve
+expressed:express|expresses|expressed|expressing
+expressed:abundant|abundantly|abundance|enriched|enrichment
+expressed:specific|detected|detectable
+expression_down:downregulate|downregulates|downregulated|downregulating|downregulation
+expression_down:down-regulate|down-regulates|down-regulated|down-regulating|down-regulation|down regulated|down regulation
+expression_down:decrease|decreases|decreased|reduced|reduction|lower|lowered
+expression_down:underexpressed|under-expressed|under expressed|underexpression|depleted|diminished
+expression_up:upregulate|upregulates|upregulated|upregulating|upregulation
+expression_up:up-regulate|up-regulates|up-regulated|up-regulating|up-regulation|up regulated|up regulation
+expression_up:increase|increases|increased|higher|elevated|elevation
+expression_up:overexpressed|over-expressed|over expressed
+inhibits:inhibit|inhibits|inhibited|inhibiting|inhibitory
+inhibits:suppress|suppresses|suppressed|suppressing|suppressor|suppressive|supress|supressed
+inhibits:repress|represses|repressed|repressing
+inhibits:prevent|prevents|prevented|preventing
+inhibits:attenuate|attenuates|attenuated|attenuating
+inhibits:impair|impairs|impaired|impairing
+inhibits:reduce|reduces|reduced|reducing
+inhibits:block|blocks|blocked|blocking
+inhibits:abrogate|abrogates|abrogated|alleviate|alleviates|alleviated|alleviating
+inhibits:ameliorate|ameliorates|ameliorated|ameliorating
+inhibits:downregulate|downregulates|downregulated|downregulating
+inhibits:down-regulate|down-regulates|down-regulated|down-regulating|down regulated
+promotes:promote|promotes|promoted|promoting|promotion
+promotes:activate|activates|activated|activating|activation
+promotes:induce|induces|induced|inducing|induction
+promotes:enhance|enhances|enhanced|enhancing
+promotes:facilitate|facilitates|facilitated|facilitating
+promotes:accelerate|accelerates|accelerated|accelerating
+promotes:stimulate|stimulates|stimulated|stimulating
+promotes:aggravate|aggravates|aggravated|aggravating
+promotes:exacerbate|exacerbates|exacerbated|exacerbating
+promotes:increase|increases|increased|increasing
+promotes:oncogene|oncogenic|oncomir
+promotes:upregulate|upregulates|upregulated|upregulating
+promotes:up-regulate|up-regulates|up-regulated|up-regulating|up regulated
+targets:target|targets|targeted|targeting
+targets:bind|binds|binding|bound
+targets:interact|interacts|interacted|interacting|interaction
