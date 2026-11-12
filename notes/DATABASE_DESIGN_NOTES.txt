@@ -198,6 +198,13 @@ FURTHER PRUNING — closure over OBSERVED terms only:
 
 Both are wanted. Only (b) is precomputed.
 
+UPDATE 2026-10-06: the UI no longer does (a). With (b) in place a term's own
+associations already carry subtype evidence, and listing a miRNA under its best
+descendant (MAX) made a term-page row stand for an association with a different
+term than the one looked up. The term page now lists the term's own associations,
+ordered by evidence. Open point: for the root term "disease" expansion found
+19,231 miRNAs against 10,783 direct, so propagation does not fully reach the root.
+
 
 5.2 THE CONSTRAINT: PROPAGATE *BEFORE* THE PER-ARTICLE LOG
 ----------------------------------------------------------
@@ -1620,3 +1627,155 @@ own get_exact_synonyms and is not affected.
     (AMBIGUOUS_ENTITY_TYPE only MIR collisions, RESOLVED_MULTI_TYPE led by
     Wnt/Notch/PPAR, statuses of the 370 reclassified acronyms), no BFO ancestors,
     propagation growth vs the 5.5x slice figure, timing.
+
+================================================================================
+16. AMENDMENT -- 2026-09-15(c): IC THRESHOLD ANNOTATION, GUIDELINE RULES, NOISE
+================================================================================
+
+16.1 ANNOTATION ROUND 1 (terms with IC_norm < 0.30)
+---------------------------------------------------
+Term lists: scripts/exploration/ic_threshold_terms.py -> outputs/ic_threshold_terms/
+(cumulative, IC_norm = IC / ln N on the restricted graphs, all terms, not only
+associated ones). 106 terms below 0.30: MONDO 41, GO-BP 30, CL 17, PW 7, BTO 11.
+
+Question: "If the knowledgebase reported 'miR-X is associated with <term>', would
+that narrow down the biological context enough to be worth a miRNA researcher's
+attention?" Scale 0 uninformative / 1 borderline / 2 informative. Generality only:
+not plausibility, not extraction correctness, not ontology well-formedness.
+
+Labels: own v1 and v2; three blind LLM raters (Opus, Sonnet, Haiku), given ontology,
+name and OBO definition only, shuffled. Files and comparison.tsv in
+outputs/ic_threshold_term_annotated/ (outputs/ is gitignored -- labels unversioned).
+
+  pair                      exact   kappa   linear-weighted kappa
+  v1 vs v2                  0.85    0.72    0.77
+  Opus vs Sonnet            0.83    0.60    0.64
+  v1 vs Opus / Sonnet       0.77/0.75  0.54/0.48  0.57/0.56
+  v2 vs Opus / Sonnet       0.75/0.74  0.48/0.47  0.49/0.52
+  Haiku vs Opus / Sonnet    0.43/0.48  0.14/0.20  0.26/0.30
+
+  - Haiku unusable (38 of 106 scored 2, 13 monotonicity violations).
+  - Own labels more lenient than Opus/Sonnet; v2 moved away from them (11 of 16
+    changes). Largest disagreement CELL (exact 0.47 vs agent median), functional
+    grouping classes (electrically active cell, motile cell, secretory cell).
+  - GO-BP and PW below 0.30 are almost all 0 for every rater.
+  - MONDO organ-system disorders at IC_norm 0.26-0.30 split ~50/50 for all raters.
+  - Monotonicity violations (ancestor scored above a descendant, of 292 pairs):
+    v1 4, v2 4, Opus 0, Sonnet 1, Haiku 13.
+Caveats: raters saw definitions, own labels from names; LLM raters are a
+consistency check, not ground truth; per-ontology n is small (7-17 for PW/BTO/CL).
+
+16.2 GUIDELINE RULES (decided)
+------------------------------
+R1 MONOTONICITY (all ontologies). A term never scores above any of its
+   descendants. Checked automatically after every labelling round.
+R2 GROUPING CLASSES (all ontologies). Union classes ("X or Y"), "... by ..."
+   classes, and classes without direct mentions whose descendant set is almost
+   that of one child score no higher than that child.
+R3 NEOPLASM CLUSTER. cancer or benign tumor 1, neoplastic disease or syndrome 1,
+   neoplasm 1, cancer 1. Chain in MONDO: cancer or benign tumor (0.183, 4,744
+   desc, 0 direct assocs) > neoplastic disease or syndrome (0.185, 4,657, 0) >
+   neoplasm (0.190, 4,404) > cancer (0.254, 2,275). Rationale: 10,787 of 19,562
+   miRNAs with any disease association are directly associated with cancer or
+   neoplasm (55%, full_run.assoc, direct only, all organisms/levels -- restate
+   from the rerun for human mature miRNAs). Neither term narrows the context
+   beyond "tumour-related". Evidence cleanliness (16.3) was deliberately NOT used
+   as an argument: labels measure generality only.
+OPEN: CELL functional grouping classes; organ-system disorders; cross-ontology
+consistency (brain / brain disorder / CNS neuron); non-human-animal duplicates.
+
+16.3 OPEN -- NOISE ON GENERAL TERMS (not addressed by the IC threshold)
+----------------------------------------------------------------------
+Measured on atlas.db 2026-09-11, distinct (sentence, span) mentions; next-word
+heuristic, not a precision measurement.
+
+  term                      mentions  followed by content word  non-context phrases
+  neoplasm (99% "tumo(u)r") 319k      86%                        tumor suppressor(s/ive)
+                                                                  ~22%, tumor necrosis
+                                                                  factor 1.5%
+  cancer                    177k      66.5%                      Cancer Genome Atlas 1.2%
+  hepatocellular carcinoma  144k      56%                        -- (control)
+
+Modifier use per se is not noise ("HCC cells", "tumor growth" are valid, if
+indirect, context). Two noise mechanisms:
+  (a) FIXED PHRASES naming something else: "tumor suppressor" is a gene class,
+      "tumor necrosis factor" a cytokine, "Cancer Genome Atlas" a resource. A
+      property of the surface form, not of term generality. Options: skip hits
+      that are the modifier of a known non-context phrase (small curated list,
+      conflicts with 13.4 automation goal -- document as stable exception), or an
+      automatic signal. Undecided.
+  (b) AMBIGUITY SINKS: ambiguous abbreviations resolved by LCA fallback land on
+      general terms. "cancer" surface forms include bc 4.9%, crc 1.3%, bca 1.2%
+      (BC/BCa have no synonym entry mapping to cancer); neoplasm has t, wt, kgn.
+      Option: IC floor on the LCA result (a fallback to a term below the floor
+      counts as FAILURE). Undecided.
+Evaluation: label ~100 random mentions each for neoplasm, cancer, HCC, cell,
+pathway (refers to the context: yes / indirect / no) to report mention precision
+of terms below vs above the cutoff. Reported as a consequence of the cutoff, not
+a criterion for choosing it.
+
+16.4 ROUND 2 (decided 2026-09-15)
+---------------------------------
+TARGET: the cutoff separates score 0 from >= 1 (a load-time floor removes only
+what is clearly uninformative).
+WHY: round 1 does not bracket the transition -- GO-BP and PW are all 0 up to 0.30,
+DISEASE is mid-transition at 0.25-0.30, CELL/TISSUE uncertain.
+SCOPE: all ontologies 0.30 <= IC_norm < 0.40, GO-BP and PW also up to 0.50.
+329 new terms: GO-BP 190, DISEASE 53, PW 34, CELL 30, TISSUE 22 (8 without
+definition). Blind file outputs/ic_threshold_term_annotated/round2/items.tsv
+(ontology, name, definition, empty inf_score; shuffled, seed 20260916); key in
+round2_key/ -- do not open before labelling is finished.
+STOPPING RULE (fixed before labelling): an ontology is done when two consecutive
+0.05 bands have >= 80% of terms scored >= 1. Not reached by 0.50 = finding:
+structural IC does not track generality in that ontology.
+PROCEDURE: own labels from the blind file under R1-R3; Opus + Sonnet on the same
+file (Haiku dropped); R1 monotonicity check afterwards; round-1 terms re-labelled
+only where disputed, applying R1-R3.
+RESULTS AND RUNNING ANALYSIS: IC_THRESHOLD_ANALYSIS.md (provisional agent-only
+round 2 results: per-ontology crossover ~0.23-0.29 for MONDO/CL/BTO, ~0.50+ for
+GO-BP; GO-BP transition not yet bracketed).
+
+16.5 RANKING BY score x IC_norm INSTEAD OF A DISPLAY CUTOFF (2026-09-16)
+-----------------------------------------------------------------------
+DECISION: the UI ranks associations by score * normalised structural IC, applied at
+QUERY TIME (association.score keeps its meaning; ablations stay comparable;
+re-tuning costs a query, not a rebuild). Implementation started 2026-09-16.
+Needs entity.ic (normalised structural IC, 14.6).
+Plan: WEIGHTED_RANKING_PLAN.md. Roots have IC 0, so they drop out by themselves.
+  - Sorted by raw score, every facet has a vacuous term at rank 1 (neoplasm,
+    disease, signaling, cell, pathway); weighting removes them with no threshold.
+  - Rejected: rank fusion (IC ties at 1.00 for every leaf dominate), Pareto front
+    (always contains the top-scoring term, however vacuous), geometric mean (same
+    order as the product).
+  - REQUIRED alongside it: a minimum-article guard (~10 articles); without it
+    1-5 article terms float up (glycolysis pathway 1a, blastema 1a).
+  - A hard DISPLAY cutoff is no longer needed. The LOAD-TIME floor still is
+    (14.3: ~10% of the file is evidence on root-level terms).
+CORPUS IDF (ic_corpus, Resnik): computed from atlas.db in 16 s over 320,963
+articles, article counts propagated up the closure (corpus_df.pkl). Do NOT rank
+by it, and (revised 2026-09-16) do NOT store it either -- supersedes the
+ic_corpus column of 8.3: AUC against the annotation labels is below structural IC
+in every ontology (GO 0.63 vs 0.78, CELL 0.67 vs 0.80, DISEASE 0.45 vs 0.71) and
+pooled it does not fix cross-ontology comparability either. Only DISEASE gains
+from the two features together (0.81). Never use it as propagation decay.
+Full tables and the miR-21 comparison: IC_THRESHOLD_ANALYSIS.md section 9.
+
+16.6 AMENDMENT TO 16.5 -- RANK BY E * ic^2, NO ARTICLE GUARD (2026-09-17)
+-----------------------------------------------------------------------
+SUPERSEDES the score * IC_norm formula and the minimum-article guard of 16.5.
+DECISION: relevance = E * ic^alpha, alpha = 2 (provisional), at query time.
+E = association.evidence_mass, the evidence before the outer log
+(score = log2(1 + E)); displayed as log2(1 + ic^alpha * E).
+WHY: score * ic = log2((1 + E)^ic), so IC acted as an exponent on the evidence:
+the exchange rate grows with evidence (a leaf with 10 articles ties cancer at
+~14,600). E * ic^alpha is a constant rate (halving IC costs 2^alpha the evidence).
+Top-10 over 1,021 human miRNAs (>= 50 DISEASE associations), share with
+disease/neoplasm/cancer in the top-10: raw 100%, alpha=1 93%, alpha=2 4%,
+score*ic 0% -- but score*ic also drops miR-21's colorectal/breast/lung cancer for
+terms with ~10x less evidence; alpha=2 keeps them.
+  - No minimum-article guard: all evidence stays ranked; n_articles is shown only.
+  - Sorts: relevance (default), evidence. Specificity sort dropped (alpha -> inf).
+  - All-types lists rank by relevance with a note that IC_norm is not calibrated
+    across ontologies. Calibration waits for the round 2 crossovers.
+  - Stored: association.evidence_mass, n_articles (incl. propagated),
+    n_direct_articles. Plan and status: WEIGHTED_RANKING_PLAN.md.
